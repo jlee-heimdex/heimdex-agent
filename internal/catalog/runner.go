@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -130,13 +131,12 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 		return
 	}
 
-	if !caps.HasSpeech && !caps.HasFaces {
+	if !caps.HasSpeech && !caps.HasFaces && !caps.HasScenes {
 		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, "no pipeline capabilities available")
 		return
 	}
 
 	artifactsBase := filepath.Join(r.pipeRunner.ArtifactsDir(), file.ID)
-	progress := 0
 	totalSteps := 0
 	if caps.HasSpeech {
 		totalSteps++
@@ -144,13 +144,18 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 	if caps.HasFaces {
 		totalSteps++
 	}
+	if caps.HasScenes {
+		totalSteps++
+	}
 	completedSteps := 0
 
+	speechOutPath := filepath.Join(artifactsBase, "speech", "result.json")
+	speechOK := false
+
 	if caps.HasSpeech {
-		outPath := filepath.Join(artifactsBase, "speech", "result.json")
 		r.logger.Info("running speech pipeline", "job_id", job.ID, "file_id", file.ID)
 
-		result, err := r.pipeRunner.RunSpeech(ctx, file.Path, outPath)
+		result, err := r.pipeRunner.RunSpeech(ctx, file.Path, speechOutPath)
 		if err != nil {
 			r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, fmt.Sprintf("speech pipeline error: %v", err))
 			return
@@ -161,41 +166,93 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 			return
 		}
 
-		if _, err := r.pipeRunner.ValidateOutput(outPath); err != nil {
+		if _, err := r.pipeRunner.ValidateOutput(speechOutPath); err != nil {
 			r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, fmt.Sprintf("speech output invalid: %v", err))
 			return
 		}
 
+		speechOK = true
 		completedSteps++
-		progress = completedSteps * 100 / totalSteps
-		r.repo.UpdateJobProgress(ctx, job.ID, progress)
+		r.repo.UpdateJobProgress(ctx, job.ID, completedSteps*100/totalSteps)
 		r.logger.Info("speech pipeline completed", "job_id", job.ID, "duration", result.Duration)
 	}
 
-	if caps.HasFaces {
-		outPath := filepath.Join(artifactsBase, "faces", "result.json")
-		r.logger.Info("running faces pipeline", "job_id", job.ID, "file_id", file.ID)
+	// Faces and scenes run in parallel (both depend on speech, not on each other)
+	runFaces := caps.HasFaces
+	runScenes := caps.HasScenes && speechOK
 
-		result, err := r.pipeRunner.RunFaces(ctx, file.Path, outPath)
-		if err != nil {
-			r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, fmt.Sprintf("faces pipeline error: %v", err))
-			return
-		}
-		if !result.IsSuccess() {
-			r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed,
-				fmt.Sprintf("faces pipeline exited %d: %s", result.ExitCode, truncateStr(result.StderrTail, 512)))
-			return
+	if runFaces || runScenes {
+		type stepResult struct {
+			name string
+			err  error
 		}
 
-		if _, err := r.pipeRunner.ValidateOutput(outPath); err != nil {
-			r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, fmt.Sprintf("faces output invalid: %v", err))
-			return
+		var wg sync.WaitGroup
+		results := make(chan stepResult, 2)
+
+		if runFaces {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				outPath := filepath.Join(artifactsBase, "faces", "result.json")
+				r.logger.Info("running faces pipeline", "job_id", job.ID, "file_id", file.ID)
+
+				result, err := r.pipeRunner.RunFaces(ctx, file.Path, outPath)
+				if err != nil {
+					results <- stepResult{"faces", fmt.Errorf("faces pipeline error: %w", err)}
+					return
+				}
+				if !result.IsSuccess() {
+					results <- stepResult{"faces", fmt.Errorf("faces pipeline exited %d: %s", result.ExitCode, truncateStr(result.StderrTail, 512))}
+					return
+				}
+				if _, err := r.pipeRunner.ValidateOutput(outPath); err != nil {
+					results <- stepResult{"faces", fmt.Errorf("faces output invalid: %w", err)}
+					return
+				}
+				r.logger.Info("faces pipeline completed", "job_id", job.ID, "duration", result.Duration)
+				results <- stepResult{"faces", nil}
+			}()
 		}
 
-		completedSteps++
-		progress = completedSteps * 100 / totalSteps
-		r.repo.UpdateJobProgress(ctx, job.ID, progress)
-		r.logger.Info("faces pipeline completed", "job_id", job.ID, "duration", result.Duration)
+		if runScenes {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				outPath := filepath.Join(artifactsBase, "scenes", "result.json")
+				r.logger.Info("running scenes pipeline", "job_id", job.ID, "file_id", file.ID)
+
+				result, err := r.pipeRunner.RunScenes(ctx, file.Path, speechOutPath, outPath)
+				if err != nil {
+					results <- stepResult{"scenes", fmt.Errorf("scenes pipeline error: %w", err)}
+					return
+				}
+				if !result.IsSuccess() {
+					results <- stepResult{"scenes", fmt.Errorf("scenes pipeline exited %d: %s", result.ExitCode, truncateStr(result.StderrTail, 512))}
+					return
+				}
+				if _, err := r.pipeRunner.ValidateOutput(outPath); err != nil {
+					results <- stepResult{"scenes", fmt.Errorf("scenes output invalid: %w", err)}
+					return
+				}
+				r.logger.Info("scenes pipeline completed", "job_id", job.ID, "duration", result.Duration)
+				results <- stepResult{"scenes", nil}
+			}()
+		}
+
+		go func() {
+			wg.Wait()
+			close(results)
+		}()
+
+		for sr := range results {
+			if sr.err != nil {
+				r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, sr.err.Error())
+				return
+			}
+			completedSteps++
+			r.repo.UpdateJobProgress(ctx, job.ID, completedSteps*100/totalSteps)
+		}
 	}
 
 	r.repo.UpdateJobStatus(ctx, job.ID, JobStatusCompleted, "")

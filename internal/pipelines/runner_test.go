@@ -296,8 +296,40 @@ func TestSafePath_ProductionMode(t *testing.T) {
 	}
 }
 
+func TestCapabilities_HasScenes(t *testing.T) {
+	caps := Capabilities{
+		HasFaces:  true,
+		HasSpeech: true,
+		HasScenes: false,
+	}
+	if caps.HasScenes {
+		t.Error("expected HasScenes=false")
+	}
+
+	caps.HasScenes = true
+	if !caps.HasScenes {
+		t.Error("expected HasScenes=true")
+	}
+}
+
+func TestCapabilities_AllTrue(t *testing.T) {
+	caps := Capabilities{
+		HasFaces:  true,
+		HasSpeech: true,
+		HasScenes: true,
+		ProbedAt:  time.Now(),
+	}
+	if !caps.HasFaces || !caps.HasSpeech || !caps.HasScenes {
+		t.Error("expected all capabilities true")
+	}
+}
+
 type fakeRunner struct {
-	doctorFn func(ctx context.Context) (*Capabilities, error)
+	doctorFn   func(ctx context.Context) (*Capabilities, error)
+	speechFn   func(ctx context.Context, videoPath, outPath string) (RunResult, error)
+	facesFn    func(ctx context.Context, videoPath, outPath string) (RunResult, error)
+	scenesFn   func(ctx context.Context, videoPath, speechResultPath, outPath string) (RunResult, error)
+	validateFn func(path string) (*PipelineOutput, error)
 }
 
 func (f *fakeRunner) RunDoctor(ctx context.Context) (*Capabilities, error) {
@@ -305,14 +337,30 @@ func (f *fakeRunner) RunDoctor(ctx context.Context) (*Capabilities, error) {
 }
 
 func (f *fakeRunner) RunSpeech(ctx context.Context, videoPath, outPath string) (RunResult, error) {
+	if f.speechFn != nil {
+		return f.speechFn(ctx, videoPath, outPath)
+	}
 	return RunResult{ExitCode: 0, OutputPath: outPath}, nil
 }
 
 func (f *fakeRunner) RunFaces(ctx context.Context, videoPath, outPath string) (RunResult, error) {
+	if f.facesFn != nil {
+		return f.facesFn(ctx, videoPath, outPath)
+	}
+	return RunResult{ExitCode: 0, OutputPath: outPath}, nil
+}
+
+func (f *fakeRunner) RunScenes(ctx context.Context, videoPath, speechResultPath, outPath string) (RunResult, error) {
+	if f.scenesFn != nil {
+		return f.scenesFn(ctx, videoPath, speechResultPath, outPath)
+	}
 	return RunResult{ExitCode: 0, OutputPath: outPath}, nil
 }
 
 func (f *fakeRunner) ValidateOutput(path string) (*PipelineOutput, error) {
+	if f.validateFn != nil {
+		return f.validateFn(path)
+	}
 	return &PipelineOutput{SchemaVersion: "1.0", PipelineVersion: "0.1.0", ModelVersion: "test"}, nil
 }
 

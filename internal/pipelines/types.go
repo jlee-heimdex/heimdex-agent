@@ -7,16 +7,17 @@ import "time"
 // Capabilities represents what the installed Python pipelines can do,
 // as reported by the `doctor --json` command.
 type Capabilities struct {
-	PackageVersion string            `json:"package_version"`
-	Python         PythonInfo        `json:"python"`
+	PackageVersion string             `json:"package_version"`
+	Python         PythonInfo         `json:"python"`
 	Dependencies   map[string]DepInfo `json:"dependencies"`
 	Executables    map[string]DepInfo `json:"executables"`
-	GPU            GPUInfo           `json:"gpu"`
-	Summary        SummaryInfo       `json:"summary"`
+	GPU            GPUInfo            `json:"gpu"`
+	Summary        SummaryInfo        `json:"summary"`
 
 	// Derived capability flags (computed after parsing)
 	HasFaces  bool      `json:"-"`
 	HasSpeech bool      `json:"-"`
+	HasScenes bool      `json:"-"`
 	ProbedAt  time.Time `json:"-"`
 }
 
@@ -50,9 +51,9 @@ type SummaryInfo struct {
 
 // RunResult is the structured outcome of executing a pipeline subprocess.
 type RunResult struct {
-	ExitCode   int    `json:"exit_code"`
-	OutputPath string `json:"output_path,omitempty"` // path to the --out JSON file
-	StderrTail string `json:"stderr_tail,omitempty"` // last N bytes of stderr
+	ExitCode   int           `json:"exit_code"`
+	OutputPath string        `json:"output_path,omitempty"` // path to the --out JSON file
+	StderrTail string        `json:"stderr_tail,omitempty"` // last N bytes of stderr
 	Duration   time.Duration `json:"duration"`
 }
 

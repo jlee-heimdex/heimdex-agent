@@ -33,9 +33,10 @@ const (
 
 	// Pipeline defaults
 	DefaultPipelinesModule        = "heimdex_media_pipelines"
-	DefaultPipelinesTimeoutDoctor = 30  // seconds
+	DefaultPipelinesTimeoutDoctor = 30   // seconds
 	DefaultPipelinesTimeoutSpeech = 1800 // 30 minutes
 	DefaultPipelinesTimeoutFaces  = 900  // 15 minutes
+	DefaultPipelinesTimeoutScenes = 600  // 10 minutes
 )
 
 // Config defines the application configuration interface
@@ -51,6 +52,7 @@ type Config interface {
 	PipelinesTimeoutDoctor() time.Duration
 	PipelinesTimeoutSpeech() time.Duration
 	PipelinesTimeoutFaces() time.Duration
+	PipelinesTimeoutScenes() time.Duration
 }
 
 // EnvConfig reads configuration from environment variables
@@ -155,6 +157,10 @@ func (c *EnvConfig) PipelinesTimeoutSpeech() time.Duration {
 
 func (c *EnvConfig) PipelinesTimeoutFaces() time.Duration {
 	return time.Duration(DefaultPipelinesTimeoutFaces) * time.Second
+}
+
+func (c *EnvConfig) PipelinesTimeoutScenes() time.Duration {
+	return time.Duration(DefaultPipelinesTimeoutScenes) * time.Second
 }
 
 // defaultDataDir returns the default data directory path

@@ -32,6 +32,10 @@ type Runner interface {
 	// RunFaces executes the face detection pipeline for a video file.
 	RunFaces(ctx context.Context, videoPath, outPath string) (RunResult, error)
 
+	// RunScenes executes the scene detection pipeline for a video file.
+	// It requires the speech result path so scenes can aggregate transcripts.
+	RunScenes(ctx context.Context, videoPath, speechResultPath, outPath string) (RunResult, error)
+
 	// ValidateOutput reads a pipeline output JSON and checks required fields.
 	ValidateOutput(path string) (*PipelineOutput, error)
 
@@ -47,6 +51,7 @@ type Config struct {
 	DoctorTimeout time.Duration // timeout for doctor command
 	SpeechTimeout time.Duration // timeout for speech pipeline
 	FacesTimeout  time.Duration // timeout for faces pipeline
+	ScenesTimeout time.Duration // timeout for scenes pipeline
 	Logger        *slog.Logger
 	DebugPaths    bool // if true, log full file paths; otherwise sanitise
 }
@@ -60,6 +65,7 @@ func DefaultConfig(dataDir string, logger *slog.Logger) Config {
 		DoctorTimeout: 30 * time.Second,
 		SpeechTimeout: 30 * time.Minute,
 		FacesTimeout:  15 * time.Minute,
+		ScenesTimeout: 10 * time.Minute,
 		Logger:        logger,
 		DebugPaths:    false,
 	}
@@ -122,11 +128,13 @@ func (r *SubprocessRunner) RunDoctor(ctx context.Context) (*Capabilities, error)
 		isAvailable(caps.Dependencies, "insightface")
 	caps.HasSpeech = isAvailable(caps.Dependencies, "whisper") &&
 		isAvailable(caps.Executables, "ffmpeg")
+	caps.HasScenes = isAvailable(caps.Executables, "ffmpeg")
 	caps.ProbedAt = time.Now()
 
 	r.cfg.Logger.Info("doctor probe complete",
 		"faces", caps.HasFaces,
 		"speech", caps.HasSpeech,
+		"scenes", caps.HasScenes,
 		"deps_available", caps.Summary.Available,
 		"deps_total", caps.Summary.Total,
 	)
@@ -156,6 +164,19 @@ func (r *SubprocessRunner) RunFaces(ctx context.Context, videoPath, outPath stri
 		"faces", "detect",
 		"--video", videoPath,
 		"--fps", "1.0",
+		"--out", outPath,
+	)
+	return result, nil
+}
+
+func (r *SubprocessRunner) RunScenes(ctx context.Context, videoPath, speechResultPath, outPath string) (RunResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.cfg.ScenesTimeout)
+	defer cancel()
+
+	result := r.exec(ctx, outPath,
+		"scenes", "pipeline",
+		"--video", videoPath,
+		"--speech-result", speechResultPath,
 		"--out", outPath,
 	)
 	return result, nil
