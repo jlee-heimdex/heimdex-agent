@@ -28,8 +28,9 @@ type File struct {
 }
 
 const (
-	JobTypeScan  = "scan"
-	JobTypeIndex = "index"
+	JobTypeScan         = "scan"
+	JobTypeIndex        = "index"
+	JobTypeUploadScenes = "upload_scenes"
 
 	JobStatusPending   = "pending"
 	JobStatusRunning   = "running"

@@ -79,7 +79,17 @@ func run() error {
 
 	catalogSvc := catalog.NewService(repo, logger)
 	playbackSvc := playback.NewServer(logger)
-	cloudClient := cloud.NewStubClient(logger)
+
+	var cloudClient cloud.Client
+	if cfg.CloudEnabled() && cfg.CloudBaseURL() != "" && cfg.CloudToken() != "" {
+		cloudClient = cloud.NewHTTPClient(cfg.CloudBaseURL(), cfg.CloudToken(), cfg.CloudOrgSlug(), logger)
+		if httpClient, ok := cloudClient.(*cloud.HTTPClient); ok {
+			httpClient.SetDeviceID(deviceID)
+		}
+		logger.Info("cloud sync enabled", "base_url", cfg.CloudBaseURL(), "org_slug", cfg.CloudOrgSlug())
+	} else {
+		cloudClient = cloud.NewStubClient(logger)
+	}
 
 	cloudClient.RegisterDevice(deviceID)
 
@@ -120,6 +130,9 @@ func run() error {
 	defer cancel()
 
 	runner := catalog.NewRunner(catalogSvc, repo, pipeRunner, doctor, logger)
+	if cfg.CloudEnabled() {
+		runner.SetCloudClient(cloudClient, cfg.CloudLibraryID())
+	}
 	go runner.Start(ctx)
 
 	apiServer := api.NewServer(api.ServerConfig{

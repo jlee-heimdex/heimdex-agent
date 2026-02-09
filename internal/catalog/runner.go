@@ -2,13 +2,17 @@ package catalog
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/heimdex/heimdex-agent/internal/cloud"
 	"github.com/heimdex/heimdex-agent/internal/pipelines"
 )
 
@@ -17,6 +21,8 @@ type Runner struct {
 	repo         Repository
 	pipeRunner   pipelines.Runner
 	doctor       *pipelines.CachedDoctor
+	cloudClient  cloud.Client
+	libraryID    string
 	logger       *slog.Logger
 	pollInterval time.Duration
 	running      atomic.Bool
@@ -32,6 +38,13 @@ func NewRunner(service *Service, repo Repository, pipeRunner pipelines.Runner, d
 		logger:       logger,
 		pollInterval: 5 * time.Second,
 	}
+}
+
+// SetCloudClient configures the cloud client for scene upload after indexing.
+// If not set (nil), scene upload is skipped silently.
+func (r *Runner) SetCloudClient(client cloud.Client, libraryID string) {
+	r.cloudClient = client
+	r.libraryID = libraryID
 }
 
 func (r *Runner) Start(ctx context.Context) {
@@ -104,6 +117,9 @@ func (r *Runner) processNextJob(ctx context.Context) {
 
 	case JobTypeIndex:
 		r.processIndexJob(ctx, job)
+
+	case JobTypeUploadScenes:
+		r.processUploadScenesJob(ctx, job)
 
 	default:
 		r.logger.Warn("unknown job type", "type", job.Type)
@@ -276,6 +292,192 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 
 	r.repo.UpdateJobStatus(ctx, job.ID, JobStatusCompleted, "")
 	r.logger.Info("index job completed", "job_id", job.ID, "file_id", file.ID)
+
+	if r.cloudClient != nil && caps.HasScenes && speechOK {
+		r.uploadScenesToCloud(ctx, job, file, artifactsBase)
+	}
+}
+
+func (r *Runner) uploadScenesToCloud(ctx context.Context, job *Job, file *File, artifactsBase string) {
+	scenePath := filepath.Join(artifactsBase, "scenes", "result.json")
+
+	data, err := os.ReadFile(scenePath)
+	if err != nil {
+		r.logger.Warn("scene upload skipped: cannot read scene output", "job_id", job.ID, "error", err)
+		return
+	}
+
+	var sceneOutput pipelines.SceneOutputPayload
+	if err := json.Unmarshal(data, &sceneOutput); err != nil {
+		r.logger.Warn("scene upload skipped: invalid scene JSON", "job_id", job.ID, "error", err)
+		return
+	}
+
+	if len(sceneOutput.Scenes) == 0 {
+		r.logger.Info("scene upload skipped: no scenes detected", "job_id", job.ID)
+		return
+	}
+
+	scenes := make([]cloud.SceneIngestDoc, 0, len(sceneOutput.Scenes))
+	for i, s := range sceneOutput.Scenes {
+		scenes = append(scenes, cloud.SceneIngestDoc{
+			SceneID: s.SceneID,
+			Index:   i,
+			StartMs: s.StartMs,
+			EndMs:   s.EndMs,
+		})
+	}
+
+	payload := cloud.SceneIngestPayload{
+		VideoID:         sceneOutput.VideoID,
+		LibraryID:       r.libraryID,
+		PipelineVersion: sceneOutput.PipelineVersion,
+		ModelVersion:    sceneOutput.ModelVersion,
+		Scenes:          scenes,
+	}
+
+	uploadCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	if err := r.cloudClient.Scenes().UploadScenes(uploadCtx, payload); err != nil {
+		r.logger.Warn("scene upload failed (non-blocking)", "job_id", job.ID, "video_id", sceneOutput.VideoID, "error", err)
+
+		// Only create retry job for retryable errors; permanent 4xx should not retry.
+		var uploadErr *cloud.UploadError
+		if errors.As(err, &uploadErr) && !uploadErr.IsRetryable() {
+			r.logger.Warn("scene upload permanent failure, no retry",
+				"job_id", job.ID, "status_code", uploadErr.StatusCode, "error", err)
+			return
+		}
+
+		retryJob := &Job{
+			ID:        NewID(),
+			Type:      JobTypeUploadScenes,
+			Status:    JobStatusPending,
+			FileID:    file.ID,
+			Progress:  0,
+			Error:     err.Error(),
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		if createErr := r.repo.CreateJob(ctx, retryJob); createErr != nil {
+			r.logger.Error("failed to create upload retry job", "error", createErr)
+		} else {
+			r.logger.Info("created upload retry job", "retry_job_id", retryJob.ID, "file_id", file.ID)
+		}
+		return
+	}
+
+	r.logger.Info("scene upload succeeded", "job_id", job.ID, "video_id", sceneOutput.VideoID, "scene_count", len(scenes))
+}
+
+func uploadBackoff(attempt int) time.Duration {
+	if attempt <= 0 {
+		return 10 * time.Second
+	}
+	backoff := 10 * time.Second
+	for i := 0; i < attempt; i++ {
+		backoff *= 3
+	}
+	const maxBackoff = 10 * time.Minute
+	if backoff > maxBackoff {
+		backoff = maxBackoff
+	}
+	return backoff
+}
+
+func (r *Runner) processUploadScenesJob(ctx context.Context, job *Job) {
+	const maxRetries = 5
+
+	delay := uploadBackoff(job.Progress)
+	if time.Since(job.UpdatedAt) < delay {
+		return
+	}
+
+	attempt := job.Progress + 1
+	if attempt > maxRetries {
+		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, fmt.Sprintf("max retries (%d) exceeded: %s", maxRetries, job.Error))
+		r.logger.Warn("upload retry abandoned", "job_id", job.ID, "attempts", attempt)
+		return
+	}
+
+	if r.pipeRunner == nil {
+		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, "pipeline runner not configured")
+		return
+	}
+	if r.cloudClient == nil {
+		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, "cloud client not configured")
+		return
+	}
+
+	file, err := r.repo.GetFile(ctx, job.FileID)
+	if err != nil || file == nil {
+		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, "file not found for retry")
+		return
+	}
+
+	r.repo.UpdateJobStatus(ctx, job.ID, JobStatusRunning, "")
+	r.repo.UpdateJobProgress(ctx, job.ID, attempt)
+
+	artifactsBase := filepath.Join(r.pipeRunner.ArtifactsDir(), file.ID)
+	r.uploadScenesToCloudRetry(ctx, job, file, artifactsBase, attempt)
+}
+
+func (r *Runner) uploadScenesToCloudRetry(ctx context.Context, job *Job, file *File, artifactsBase string, attempt int) {
+	scenePath := filepath.Join(artifactsBase, "scenes", "result.json")
+
+	data, err := os.ReadFile(scenePath)
+	if err != nil {
+		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, fmt.Sprintf("cannot read scene output: %v", err))
+		return
+	}
+
+	var sceneOutput pipelines.SceneOutputPayload
+	if err := json.Unmarshal(data, &sceneOutput); err != nil {
+		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, fmt.Sprintf("invalid scene JSON: %v", err))
+		return
+	}
+
+	if len(sceneOutput.Scenes) == 0 {
+		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusCompleted, "")
+		return
+	}
+
+	scenes := make([]cloud.SceneIngestDoc, 0, len(sceneOutput.Scenes))
+	for i, s := range sceneOutput.Scenes {
+		scenes = append(scenes, cloud.SceneIngestDoc{
+			SceneID: s.SceneID,
+			Index:   i,
+			StartMs: s.StartMs,
+			EndMs:   s.EndMs,
+		})
+	}
+
+	payload := cloud.SceneIngestPayload{
+		VideoID:         sceneOutput.VideoID,
+		LibraryID:       r.libraryID,
+		PipelineVersion: sceneOutput.PipelineVersion,
+		ModelVersion:    sceneOutput.ModelVersion,
+		Scenes:          scenes,
+	}
+
+	uploadCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	if err := r.cloudClient.Scenes().UploadScenes(uploadCtx, payload); err != nil {
+		var uploadErr *cloud.UploadError
+		if errors.As(err, &uploadErr) && !uploadErr.IsRetryable() {
+			r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, fmt.Sprintf("permanent error (HTTP %d): %s", uploadErr.StatusCode, uploadErr.Body))
+			return
+		}
+
+		r.logger.Warn("upload retry failed", "job_id", job.ID, "attempt", attempt, "error", err)
+		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusPending, err.Error())
+		return
+	}
+
+	r.repo.UpdateJobStatus(ctx, job.ID, JobStatusCompleted, "")
+	r.logger.Info("upload retry succeeded", "job_id", job.ID, "attempt", attempt, "video_id", sceneOutput.VideoID)
 }
 
 func truncateStr(s string, maxLen int) string {

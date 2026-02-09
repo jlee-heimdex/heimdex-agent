@@ -25,6 +25,13 @@ const (
 	EnvPipelinesPython = "HEIMDEX_PIPELINES_PYTHON"
 	EnvPipelinesModule = "HEIMDEX_PIPELINES_MODULE"
 
+	// Cloud sync environment variable names
+	EnvCloudEnabled   = "HEIMDEX_CLOUD_ENABLED"
+	EnvCloudBaseURL   = "HEIMDEX_CLOUD_BASE_URL"
+	EnvCloudToken     = "HEIMDEX_CLOUD_TOKEN"
+	EnvCloudOrgSlug   = "HEIMDEX_CLOUD_ORG_SLUG"
+	EnvCloudLibraryID = "HEIMDEX_CLOUD_LIBRARY_ID"
+
 	// Database filename
 	DBFilename = "heimdex.db"
 
@@ -53,6 +60,11 @@ type Config interface {
 	PipelinesTimeoutSpeech() time.Duration
 	PipelinesTimeoutFaces() time.Duration
 	PipelinesTimeoutScenes() time.Duration
+	CloudEnabled() bool
+	CloudBaseURL() string
+	CloudToken() string
+	CloudOrgSlug() string
+	CloudLibraryID() string
 }
 
 // EnvConfig reads configuration from environment variables
@@ -64,6 +76,12 @@ type EnvConfig struct {
 
 	pipelinesPython string
 	pipelinesModule string
+
+	cloudEnabled   bool
+	cloudBaseURL   string
+	cloudToken     string
+	cloudOrgSlug   string
+	cloudLibraryID string
 }
 
 // New creates a new EnvConfig with defaults and environment variable overrides
@@ -102,6 +120,14 @@ func New() (*EnvConfig, error) {
 	if pm := os.Getenv(EnvPipelinesModule); pm != "" {
 		cfg.pipelinesModule = pm
 	}
+
+	if ce := os.Getenv(EnvCloudEnabled); ce == "true" || ce == "1" {
+		cfg.cloudEnabled = true
+	}
+	cfg.cloudBaseURL = os.Getenv(EnvCloudBaseURL)
+	cfg.cloudToken = os.Getenv(EnvCloudToken)
+	cfg.cloudOrgSlug = os.Getenv(EnvCloudOrgSlug)
+	cfg.cloudLibraryID = os.Getenv(EnvCloudLibraryID)
 
 	return cfg, nil
 }
@@ -161,6 +187,26 @@ func (c *EnvConfig) PipelinesTimeoutFaces() time.Duration {
 
 func (c *EnvConfig) PipelinesTimeoutScenes() time.Duration {
 	return time.Duration(DefaultPipelinesTimeoutScenes) * time.Second
+}
+
+func (c *EnvConfig) CloudEnabled() bool {
+	return c.cloudEnabled
+}
+
+func (c *EnvConfig) CloudBaseURL() string {
+	return c.cloudBaseURL
+}
+
+func (c *EnvConfig) CloudToken() string {
+	return c.cloudToken
+}
+
+func (c *EnvConfig) CloudOrgSlug() string {
+	return c.cloudOrgSlug
+}
+
+func (c *EnvConfig) CloudLibraryID() string {
+	return c.cloudLibraryID
 }
 
 // defaultDataDir returns the default data directory path

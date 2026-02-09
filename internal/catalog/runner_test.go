@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/heimdex/heimdex-agent/internal/cloud"
 	"github.com/heimdex/heimdex-agent/internal/db"
 	"github.com/heimdex/heimdex-agent/internal/pipelines"
 )
@@ -437,5 +439,247 @@ func TestProcessIndexJob_FacesFailsScenesStillDrains(t *testing.T) {
 	updatedJob, _ := repo.GetJob(context.Background(), job.ID)
 	if updatedJob.Status != JobStatusFailed {
 		t.Errorf("job status = %s, want %s", updatedJob.Status, JobStatusFailed)
+	}
+}
+
+type fakeSceneUploader struct {
+	uploadFn func(ctx context.Context, payload cloud.SceneIngestPayload) error
+}
+
+func (f *fakeSceneUploader) UploadScenes(ctx context.Context, payload cloud.SceneIngestPayload) error {
+	if f.uploadFn != nil {
+		return f.uploadFn(ctx, payload)
+	}
+	return nil
+}
+
+type fakeCloudClient struct {
+	scenes *fakeSceneUploader
+}
+
+func (f *fakeCloudClient) Auth() cloud.AuthService              { return nil }
+func (f *fakeCloudClient) Upload() cloud.UploadService          { return nil }
+func (f *fakeCloudClient) Scenes() cloud.SceneUploader          { return f.scenes }
+func (f *fakeCloudClient) RegisterDevice(deviceID string) error { return nil }
+
+func writeSceneResult(t *testing.T, artifactsDir, fileID string) {
+	t.Helper()
+	scenesDir := filepath.Join(artifactsDir, fileID, "scenes")
+	if err := os.MkdirAll(scenesDir, 0755); err != nil {
+		t.Fatalf("mkdir scenes: %v", err)
+	}
+	payload := pipelines.SceneOutputPayload{
+		PipelineOutput: pipelines.PipelineOutput{
+			SchemaVersion:   "1.0",
+			PipelineVersion: "0.2.0",
+			ModelVersion:    "ffmpeg-scenecut",
+		},
+		VideoID: "video-1",
+		Scenes: []pipelines.SceneBoundary{
+			{SceneID: "video-1_scene_0", StartMs: 0, EndMs: 5000},
+		},
+	}
+	data, _ := json.Marshal(payload)
+	if err := os.WriteFile(filepath.Join(scenesDir, "result.json"), data, 0644); err != nil {
+		t.Fatalf("write scene result: %v", err)
+	}
+}
+
+func TestUploadScenesToCloud_PermanentError_NoRetryJob(t *testing.T) {
+	fake := &fakePipeRunner{}
+	caps := &pipelines.Capabilities{HasSpeech: true, HasFaces: true, HasScenes: true, ProbedAt: time.Now()}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+
+	tmpDir := t.TempDir()
+	fake.artifacts = tmpDir
+
+	cc := &fakeCloudClient{scenes: &fakeSceneUploader{
+		uploadFn: func(_ context.Context, _ cloud.SceneIngestPayload) error {
+			return &cloud.UploadError{StatusCode: 422, Body: "unprocessable"}
+		},
+	}}
+	runner.SetCloudClient(cc, "lib-1")
+
+	_, file := createTestJobAndFile(t, repo)
+	writeSceneResult(t, tmpDir, file.ID)
+
+	job := &Job{
+		ID:        NewID(),
+		Type:      JobTypeIndex,
+		Status:    JobStatusRunning,
+		FileID:    file.ID,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := repo.CreateJob(context.Background(), job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	runner.uploadScenesToCloud(context.Background(), job, file, filepath.Join(tmpDir, file.ID))
+
+	jobs, _ := repo.ListJobs(context.Background(), 100)
+	for _, j := range jobs {
+		if j.Type == JobTypeUploadScenes {
+			t.Error("expected NO upload_scenes retry job for permanent 422 error, but found one")
+		}
+	}
+}
+
+func TestUploadScenesToCloud_RetryableError_CreatesRetryJob(t *testing.T) {
+	fake := &fakePipeRunner{}
+	caps := &pipelines.Capabilities{HasSpeech: true, HasFaces: true, HasScenes: true, ProbedAt: time.Now()}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+
+	tmpDir := t.TempDir()
+	fake.artifacts = tmpDir
+
+	cc := &fakeCloudClient{scenes: &fakeSceneUploader{
+		uploadFn: func(_ context.Context, _ cloud.SceneIngestPayload) error {
+			return &cloud.UploadError{StatusCode: 500, Body: "internal server error"}
+		},
+	}}
+	runner.SetCloudClient(cc, "lib-1")
+
+	_, file := createTestJobAndFile(t, repo)
+	writeSceneResult(t, tmpDir, file.ID)
+
+	job := &Job{
+		ID:        NewID(),
+		Type:      JobTypeIndex,
+		Status:    JobStatusRunning,
+		FileID:    file.ID,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := repo.CreateJob(context.Background(), job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	runner.uploadScenesToCloud(context.Background(), job, file, filepath.Join(tmpDir, file.ID))
+
+	found := false
+	jobs, _ := repo.ListJobs(context.Background(), 100)
+	for _, j := range jobs {
+		if j.Type == JobTypeUploadScenes {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected upload_scenes retry job for 500 error, but none found")
+	}
+}
+
+func TestUploadScenesToCloud_NetworkError_CreatesRetryJob(t *testing.T) {
+	fake := &fakePipeRunner{}
+	caps := &pipelines.Capabilities{HasSpeech: true, HasFaces: true, HasScenes: true, ProbedAt: time.Now()}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+
+	tmpDir := t.TempDir()
+	fake.artifacts = tmpDir
+
+	cc := &fakeCloudClient{scenes: &fakeSceneUploader{
+		uploadFn: func(_ context.Context, _ cloud.SceneIngestPayload) error {
+			return fmt.Errorf("connection refused")
+		},
+	}}
+	runner.SetCloudClient(cc, "lib-1")
+
+	_, file := createTestJobAndFile(t, repo)
+	writeSceneResult(t, tmpDir, file.ID)
+
+	job := &Job{
+		ID:        NewID(),
+		Type:      JobTypeIndex,
+		Status:    JobStatusRunning,
+		FileID:    file.ID,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := repo.CreateJob(context.Background(), job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	runner.uploadScenesToCloud(context.Background(), job, file, filepath.Join(tmpDir, file.ID))
+
+	found := false
+	jobs, _ := repo.ListJobs(context.Background(), 100)
+	for _, j := range jobs {
+		if j.Type == JobTypeUploadScenes {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected upload_scenes retry job for network error, but none found")
+	}
+}
+
+func TestUploadBackoff(t *testing.T) {
+	cases := []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{0, 10 * time.Second},
+		{1, 30 * time.Second},
+		{2, 90 * time.Second},
+		{3, 270 * time.Second},
+		{4, 600 * time.Second},
+		{5, 600 * time.Second},
+		{10, 600 * time.Second},
+	}
+	for _, tc := range cases {
+		got := uploadBackoff(tc.attempt)
+		if got != tc.want {
+			t.Errorf("uploadBackoff(%d) = %v, want %v", tc.attempt, got, tc.want)
+		}
+	}
+}
+
+func TestProcessUploadScenesJob_RespectsBackoff(t *testing.T) {
+	fake := &fakePipeRunner{}
+	caps := &pipelines.Capabilities{HasSpeech: true, HasFaces: true, HasScenes: true, ProbedAt: time.Now()}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+
+	tmpDir := t.TempDir()
+	fake.artifacts = tmpDir
+
+	uploadCalled := false
+	cc := &fakeCloudClient{scenes: &fakeSceneUploader{
+		uploadFn: func(_ context.Context, _ cloud.SceneIngestPayload) error {
+			uploadCalled = true
+			return nil
+		},
+	}}
+	runner.SetCloudClient(cc, "lib-1")
+
+	_, file := createTestJobAndFile(t, repo)
+	writeSceneResult(t, tmpDir, file.ID)
+
+	now := time.Now()
+	job := &Job{
+		ID:        NewID(),
+		Type:      JobTypeUploadScenes,
+		Status:    JobStatusPending,
+		FileID:    file.ID,
+		Progress:  1,
+		UpdatedAt: now,
+		CreatedAt: now,
+	}
+	if err := repo.CreateJob(context.Background(), job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	runner.processUploadScenesJob(context.Background(), job)
+
+	if uploadCalled {
+		t.Error("expected upload to be skipped due to backoff, but it was called")
+	}
+
+	updatedJob, _ := repo.GetJob(context.Background(), job.ID)
+	if updatedJob.Status != JobStatusPending {
+		t.Errorf("job should remain pending during backoff, got %s", updatedJob.Status)
 	}
 }

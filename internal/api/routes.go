@@ -16,7 +16,19 @@ func NewRouter(cfg ServerConfig) *chi.Mux {
 	r.Use(RecoveryMiddleware(cfg.Logger))
 	r.Use(LoggingMiddleware(cfg.Logger))
 
-	r.Get("/health", healthHandler(cfg))
+	r.Group(func(r chi.Router) {
+		r.Use(CORSAllowlist())
+		r.Get("/health", healthHandler(cfg))
+		r.Options("/health", noContent)
+	})
+
+	r.Group(func(r chi.Router) {
+		r.Use(CORSAllowlist())
+		r.Use(LoopbackGuard())
+		r.Get("/playback/file", playbackHandler(cfg))
+		r.Head("/playback/file", playbackHandler(cfg))
+		r.Options("/playback/file", noContent)
+	})
 
 	r.Group(func(r chi.Router) {
 		r.Use(AuthMiddleware(cfg.Repository, cfg.Logger))
@@ -29,10 +41,13 @@ func NewRouter(cfg ServerConfig) *chi.Mux {
 		r.Post("/scan", scanHandler(cfg))
 		r.Get("/jobs", listJobsHandler(cfg))
 		r.Get("/jobs/{id}", getJobHandler(cfg))
-		r.Get("/playback/file", playbackHandler(cfg))
 	})
 
 	return r
+}
+
+var noContent http.HandlerFunc = func(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func healthHandler(cfg ServerConfig) http.HandlerFunc {
