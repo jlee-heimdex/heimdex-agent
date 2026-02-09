@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -17,6 +18,8 @@ import (
 const (
 	maxStderrBytes = 8 * 1024 // 8 KB tail of stderr kept for diagnostics
 )
+
+var sceneIDPattern = regexp.MustCompile(`^.+_scene_\d+$`)
 
 // Runner executes Python pipeline commands as subprocesses.
 // It is the single implementation of the pipeline execution contract
@@ -38,6 +41,9 @@ type Runner interface {
 
 	// ValidateOutput reads a pipeline output JSON and checks required fields.
 	ValidateOutput(path string) (*PipelineOutput, error)
+
+	// ValidateSceneOutput validates scene pipeline output including payload invariants.
+	ValidateSceneOutput(path string) (*PipelineOutput, error)
 
 	// ArtifactsDir returns the base directory for pipeline outputs.
 	ArtifactsDir() string
@@ -123,13 +129,11 @@ func (r *SubprocessRunner) RunDoctor(ctx context.Context) (*Capabilities, error)
 		return nil, fmt.Errorf("cannot parse doctor JSON: %w", err)
 	}
 
-	// Derive capability flags
-	caps.HasFaces = isAvailable(caps.Dependencies, "cv2") &&
-		isAvailable(caps.Dependencies, "insightface")
-	caps.HasSpeech = isAvailable(caps.Dependencies, "whisper") &&
-		isAvailable(caps.Executables, "ffmpeg")
-	caps.HasScenes = isAvailable(caps.Executables, "ffmpeg")
-	caps.ProbedAt = time.Now()
+	if caps.Pipelines == (PipelinesInfo{}) {
+		r.cfg.Logger.Warn("doctor output missing pipelines field, falling back to legacy inference")
+	}
+
+	DeriveCapabilities(&caps)
 
 	r.cfg.Logger.Info("doctor probe complete",
 		"faces", caps.HasFaces,
@@ -140,6 +144,27 @@ func (r *SubprocessRunner) RunDoctor(ctx context.Context) (*Capabilities, error)
 	)
 
 	return &caps, nil
+}
+
+func DeriveCapabilities(caps *Capabilities) {
+	if caps == nil {
+		return
+	}
+
+	caps.ProbedAt = time.Now()
+
+	if caps.Pipelines != (PipelinesInfo{}) {
+		caps.HasSpeech = caps.Pipelines.Speech
+		caps.HasFaces = caps.Pipelines.Faces
+		caps.HasScenes = caps.Pipelines.Scenes
+		return
+	}
+
+	caps.HasFaces = isAvailable(caps.Dependencies, "cv2") &&
+		isAvailable(caps.Dependencies, "insightface")
+	caps.HasSpeech = isAvailable(caps.Dependencies, "whisper") &&
+		isAvailable(caps.Executables, "ffmpeg")
+	caps.HasScenes = isAvailable(caps.Executables, "ffmpeg")
 }
 
 // RunSpeech runs the speech pipeline CLI.
@@ -209,6 +234,75 @@ func (r *SubprocessRunner) ValidateOutput(path string) (*PipelineOutput, error) 
 	}
 
 	return &out, nil
+}
+
+func (r *SubprocessRunner) ValidateSceneOutput(path string) (*PipelineOutput, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read output file %s: %w", r.safePath(path), err)
+	}
+
+	var out SceneOutputPayload
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("cannot parse output JSON: %w", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("cannot parse output JSON: %w", err)
+	}
+
+	issues := make([]string, 0)
+
+	if !out.RequiredFieldsPresent() {
+		if out.SchemaVersion == "" {
+			issues = append(issues, "schema_version is required")
+		}
+		if out.PipelineVersion == "" {
+			issues = append(issues, "pipeline_version is required")
+		}
+		if out.ModelVersion == "" {
+			issues = append(issues, "model_version is required")
+		}
+	}
+
+	if out.VideoID == "" {
+		issues = append(issues, "video_id is required")
+	}
+
+	rawScenes, hasScenes := raw["scenes"]
+	if !hasScenes {
+		issues = append(issues, "scenes field is required")
+	}
+
+	if hasScenes {
+		if bytes.Equal(bytes.TrimSpace(rawScenes), []byte("null")) {
+			issues = append(issues, "scenes must be an array")
+		}
+
+		prevEnd := 0
+		for i, scene := range out.Scenes {
+			if scene.StartMs < 0 {
+				issues = append(issues, fmt.Sprintf("scenes[%d].start_ms must be >= 0", i))
+			}
+			if scene.EndMs <= scene.StartMs {
+				issues = append(issues, fmt.Sprintf("scenes[%d].end_ms must be greater than start_ms", i))
+			}
+			if !sceneIDPattern.MatchString(scene.SceneID) {
+				issues = append(issues, fmt.Sprintf("scenes[%d].scene_id must match ^.+_scene_\\d+$", i))
+			}
+			if i > 0 && scene.StartMs < prevEnd {
+				issues = append(issues, fmt.Sprintf("scenes[%d].start_ms must be >= previous scene end_ms", i))
+			}
+			prevEnd = scene.EndMs
+		}
+	}
+
+	if len(issues) > 0 {
+		return &out.PipelineOutput, fmt.Errorf("scene output validation failed: %s", strings.Join(issues, "; "))
+	}
+
+	return &out.PipelineOutput, nil
 }
 
 // exec is the core subprocess execution helper.

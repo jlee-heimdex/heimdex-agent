@@ -90,17 +90,24 @@ func statusHandler(cfg ServerConfig) http.HandlerFunc {
 		}
 
 		if cfg.Doctor != nil {
-			caps, err := cfg.Doctor.Get(ctx)
-			if err == nil && caps != nil {
+			caps := cfg.Doctor.Peek()
+			if caps != nil {
+				probeAt := ""
+				if !caps.ProbedAt.IsZero() {
+					probeAt = caps.ProbedAt.Format(time.RFC3339)
+				}
 				resp.Pipelines = &PipelineStatusResponse{
 					HasFaces:    caps.HasFaces,
 					HasSpeech:   caps.HasSpeech,
-					LastProbeAt: caps.ProbedAt.Format(time.RFC3339),
+					HasScenes:   caps.HasScenes,
+					LastProbeAt: probeAt,
 					DepsAvail:   caps.Summary.Available,
 					DepsTotal:   caps.Summary.Total,
 				}
 			}
 		}
+
+		resp.Constraints = &ConstraintsResponse{ScenesRequiresSpeech: true}
 
 		WriteJSON(w, http.StatusOK, resp)
 	}

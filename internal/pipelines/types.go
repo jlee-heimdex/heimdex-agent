@@ -13,12 +13,19 @@ type Capabilities struct {
 	Executables    map[string]DepInfo `json:"executables"`
 	GPU            GPUInfo            `json:"gpu"`
 	Summary        SummaryInfo        `json:"summary"`
+	Pipelines      PipelinesInfo      `json:"pipelines"`
 
-	// Derived capability flags (computed after parsing)
 	HasFaces  bool      `json:"-"`
 	HasSpeech bool      `json:"-"`
 	HasScenes bool      `json:"-"`
 	ProbedAt  time.Time `json:"-"`
+}
+
+// PipelinesInfo reports per-pipeline availability from doctor JSON.
+type PipelinesInfo struct {
+	Speech bool `json:"speech"`
+	Faces  bool `json:"faces"`
+	Scenes bool `json:"scenes"`
 }
 
 // PythonInfo holds Python runtime information.
@@ -66,6 +73,18 @@ type PipelineOutput struct {
 	SchemaVersion   string `json:"schema_version"`
 	PipelineVersion string `json:"pipeline_version"`
 	ModelVersion    string `json:"model_version"`
+}
+
+type SceneOutputPayload struct {
+	PipelineOutput
+	VideoID string          `json:"video_id"`
+	Scenes  []SceneBoundary `json:"scenes"`
+}
+
+type SceneBoundary struct {
+	SceneID string `json:"scene_id"`
+	StartMs int    `json:"start_ms"`
+	EndMs   int    `json:"end_ms"`
 }
 
 // RequiredFieldsPresent checks the hard invariants the agent enforces.

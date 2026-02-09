@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -193,6 +194,196 @@ func TestValidateOutput_FileNotFound(t *testing.T) {
 	}
 }
 
+func TestValidateSceneOutput_Valid(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scene.json")
+	data := `{
+		"schema_version":"1.0",
+		"pipeline_version":"0.2.0",
+		"model_version":"ffmpeg-scenecut",
+		"video_id":"video-1",
+		"scenes":[
+			{"scene_id":"video-1_scene_0","start_ms":0,"end_ms":1000}
+		]
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write scene output: %v", err)
+	}
+
+	cfg := DefaultConfig(dir, nil)
+	r := &SubprocessRunner{cfg: cfg, python: "python3"}
+
+	out, err := r.ValidateSceneOutput(path)
+	if err != nil {
+		t.Fatalf("ValidateSceneOutput error: %v", err)
+	}
+	if !out.RequiredFieldsPresent() {
+		t.Error("expected required fields present")
+	}
+}
+
+func TestValidateSceneOutput_EmptyScenes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scene.json")
+	data := `{
+		"schema_version":"1.0",
+		"pipeline_version":"0.2.0",
+		"model_version":"ffmpeg-scenecut",
+		"video_id":"video-1",
+		"scenes":[]
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write scene output: %v", err)
+	}
+
+	cfg := DefaultConfig(dir, nil)
+	r := &SubprocessRunner{cfg: cfg, python: "python3"}
+
+	if _, err := r.ValidateSceneOutput(path); err != nil {
+		t.Fatalf("ValidateSceneOutput error: %v", err)
+	}
+}
+
+func TestValidateSceneOutput_MissingVideoID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scene.json")
+	data := `{
+		"schema_version":"1.0",
+		"pipeline_version":"0.2.0",
+		"model_version":"ffmpeg-scenecut",
+		"scenes":[]
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write scene output: %v", err)
+	}
+
+	cfg := DefaultConfig(dir, nil)
+	r := &SubprocessRunner{cfg: cfg, python: "python3"}
+
+	_, err := r.ValidateSceneOutput(path)
+	if err == nil || !strings.Contains(err.Error(), "video_id is required") {
+		t.Fatalf("expected missing video_id error, got: %v", err)
+	}
+}
+
+func TestValidateSceneOutput_NegativeTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scene.json")
+	data := `{
+		"schema_version":"1.0",
+		"pipeline_version":"0.2.0",
+		"model_version":"ffmpeg-scenecut",
+		"video_id":"video-1",
+		"scenes":[{"scene_id":"video-1_scene_0","start_ms":-1,"end_ms":1000}]
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write scene output: %v", err)
+	}
+
+	cfg := DefaultConfig(dir, nil)
+	r := &SubprocessRunner{cfg: cfg, python: "python3"}
+
+	_, err := r.ValidateSceneOutput(path)
+	if err == nil || !strings.Contains(err.Error(), "start_ms must be >= 0") {
+		t.Fatalf("expected negative timestamp error, got: %v", err)
+	}
+}
+
+func TestValidateSceneOutput_EndBeforeStart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scene.json")
+	data := `{
+		"schema_version":"1.0",
+		"pipeline_version":"0.2.0",
+		"model_version":"ffmpeg-scenecut",
+		"video_id":"video-1",
+		"scenes":[{"scene_id":"video-1_scene_0","start_ms":1000,"end_ms":1000}]
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write scene output: %v", err)
+	}
+
+	cfg := DefaultConfig(dir, nil)
+	r := &SubprocessRunner{cfg: cfg, python: "python3"}
+
+	_, err := r.ValidateSceneOutput(path)
+	if err == nil || !strings.Contains(err.Error(), "end_ms must be greater than start_ms") {
+		t.Fatalf("expected end before start error, got: %v", err)
+	}
+}
+
+func TestValidateSceneOutput_NonMonotonic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scene.json")
+	data := `{
+		"schema_version":"1.0",
+		"pipeline_version":"0.2.0",
+		"model_version":"ffmpeg-scenecut",
+		"video_id":"video-1",
+		"scenes":[
+			{"scene_id":"video-1_scene_0","start_ms":0,"end_ms":1000},
+			{"scene_id":"video-1_scene_1","start_ms":500,"end_ms":1500}
+		]
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write scene output: %v", err)
+	}
+
+	cfg := DefaultConfig(dir, nil)
+	r := &SubprocessRunner{cfg: cfg, python: "python3"}
+
+	_, err := r.ValidateSceneOutput(path)
+	if err == nil || !strings.Contains(err.Error(), "start_ms must be >= previous scene end_ms") {
+		t.Fatalf("expected non-monotonic error, got: %v", err)
+	}
+}
+
+func TestValidateSceneOutput_InvalidSceneID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scene.json")
+	data := `{
+		"schema_version":"1.0",
+		"pipeline_version":"0.2.0",
+		"model_version":"ffmpeg-scenecut",
+		"video_id":"video-1",
+		"scenes":[{"scene_id":"video-1","start_ms":0,"end_ms":1000}]
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write scene output: %v", err)
+	}
+
+	cfg := DefaultConfig(dir, nil)
+	r := &SubprocessRunner{cfg: cfg, python: "python3"}
+
+	_, err := r.ValidateSceneOutput(path)
+	if err == nil || !strings.Contains(err.Error(), "scene_id must match") {
+		t.Fatalf("expected invalid scene_id error, got: %v", err)
+	}
+}
+
+func TestValidateSceneOutput_MissingMetaFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scene.json")
+	data := `{
+		"schema_version":"",
+		"pipeline_version":"0.2.0",
+		"model_version":"ffmpeg-scenecut",
+		"video_id":"video-1",
+		"scenes":[]
+	}`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write scene output: %v", err)
+	}
+
+	cfg := DefaultConfig(dir, nil)
+	r := &SubprocessRunner{cfg: cfg, python: "python3"}
+
+	_, err := r.ValidateSceneOutput(path)
+	if err == nil || !strings.Contains(err.Error(), "schema_version is required") {
+		t.Fatalf("expected missing meta field error, got: %v", err)
+	}
+}
+
 func TestCachedDoctor_TTL(t *testing.T) {
 	calls := 0
 	fake := &fakeRunner{
@@ -296,40 +487,114 @@ func TestSafePath_ProductionMode(t *testing.T) {
 	}
 }
 
-func TestCapabilities_HasScenes(t *testing.T) {
-	caps := Capabilities{
-		HasFaces:  true,
-		HasSpeech: true,
-		HasScenes: false,
-	}
-	if caps.HasScenes {
-		t.Error("expected HasScenes=false")
+func TestParseDoctorJSON_WithPipelines(t *testing.T) {
+	raw := []byte(`{
+		"dependencies": {
+			"cv2": {"available": true},
+			"insightface": {"available": true},
+			"whisper": {"available": false}
+		},
+		"executables": {
+			"ffmpeg": {"available": false}
+		},
+		"pipelines": {
+			"speech": true,
+			"faces": false,
+			"scenes": true
+		}
+	}`)
+
+	var caps Capabilities
+	if err := json.Unmarshal(raw, &caps); err != nil {
+		t.Fatalf("unmarshal doctor JSON: %v", err)
 	}
 
-	caps.HasScenes = true
+	DeriveCapabilities(&caps)
+
+	if !caps.HasSpeech {
+		t.Error("HasSpeech = false, want true from pipelines")
+	}
+	if caps.HasFaces {
+		t.Error("HasFaces = true, want false from pipelines")
+	}
 	if !caps.HasScenes {
-		t.Error("expected HasScenes=true")
+		t.Error("HasScenes = false, want true from pipelines")
+	}
+	if caps.ProbedAt.IsZero() {
+		t.Error("ProbedAt is zero, want non-zero")
 	}
 }
 
-func TestCapabilities_AllTrue(t *testing.T) {
-	caps := Capabilities{
-		HasFaces:  true,
-		HasSpeech: true,
-		HasScenes: true,
-		ProbedAt:  time.Now(),
+func TestParseDoctorJSON_LegacyFallback(t *testing.T) {
+	raw := []byte(`{
+		"dependencies": {
+			"cv2": {"available": true},
+			"insightface": {"available": true},
+			"whisper": {"available": true}
+		},
+		"executables": {
+			"ffmpeg": {"available": true}
+		}
+	}`)
+
+	var caps Capabilities
+	if err := json.Unmarshal(raw, &caps); err != nil {
+		t.Fatalf("unmarshal doctor JSON: %v", err)
 	}
-	if !caps.HasFaces || !caps.HasSpeech || !caps.HasScenes {
-		t.Error("expected all capabilities true")
+
+	DeriveCapabilities(&caps)
+
+	if !caps.HasFaces {
+		t.Error("HasFaces = false, want true from legacy inference")
+	}
+	if !caps.HasSpeech {
+		t.Error("HasSpeech = false, want true from legacy inference")
+	}
+	if !caps.HasScenes {
+		t.Error("HasScenes = false, want true from legacy inference")
+	}
+	if caps.ProbedAt.IsZero() {
+		t.Error("ProbedAt is zero, want non-zero")
+	}
+}
+
+func TestParseDoctorJSON_ScenesWithoutSpeech(t *testing.T) {
+	raw := []byte(`{
+		"dependencies": {
+			"whisper": {"available": true}
+		},
+		"executables": {
+			"ffmpeg": {"available": true}
+		},
+		"pipelines": {
+			"speech": false,
+			"faces": true,
+			"scenes": true
+		}
+	}`)
+
+	var caps Capabilities
+	if err := json.Unmarshal(raw, &caps); err != nil {
+		t.Fatalf("unmarshal doctor JSON: %v", err)
+	}
+
+	DeriveCapabilities(&caps)
+
+	if caps.HasSpeech {
+		t.Error("HasSpeech = true, want false from pipelines")
+	}
+	if !caps.HasScenes {
+		t.Error("HasScenes = false, want true from pipelines")
 	}
 }
 
 type fakeRunner struct {
-	doctorFn   func(ctx context.Context) (*Capabilities, error)
-	speechFn   func(ctx context.Context, videoPath, outPath string) (RunResult, error)
-	facesFn    func(ctx context.Context, videoPath, outPath string) (RunResult, error)
-	scenesFn   func(ctx context.Context, videoPath, speechResultPath, outPath string) (RunResult, error)
-	validateFn func(path string) (*PipelineOutput, error)
+	doctorFn        func(ctx context.Context) (*Capabilities, error)
+	speechFn        func(ctx context.Context, videoPath, outPath string) (RunResult, error)
+	facesFn         func(ctx context.Context, videoPath, outPath string) (RunResult, error)
+	scenesFn        func(ctx context.Context, videoPath, speechResultPath, outPath string) (RunResult, error)
+	validateFn      func(path string) (*PipelineOutput, error)
+	validateSceneFn func(path string) (*PipelineOutput, error)
 }
 
 func (f *fakeRunner) RunDoctor(ctx context.Context) (*Capabilities, error) {
@@ -362,6 +627,13 @@ func (f *fakeRunner) ValidateOutput(path string) (*PipelineOutput, error) {
 		return f.validateFn(path)
 	}
 	return &PipelineOutput{SchemaVersion: "1.0", PipelineVersion: "0.1.0", ModelVersion: "test"}, nil
+}
+
+func (f *fakeRunner) ValidateSceneOutput(path string) (*PipelineOutput, error) {
+	if f.validateSceneFn != nil {
+		return f.validateSceneFn(path)
+	}
+	return f.ValidateOutput(path)
 }
 
 func (f *fakeRunner) ArtifactsDir() string {

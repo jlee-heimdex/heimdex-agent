@@ -117,6 +117,11 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 		return
 	}
 
+	if err := ctx.Err(); err != nil {
+		r.repo.UpdateJobStatus(context.WithoutCancel(ctx), job.ID, JobStatusFailed, fmt.Sprintf("index job cancelled: %v", err))
+		return
+	}
+
 	file, err := r.repo.GetFile(ctx, job.FileID)
 	if err != nil || file == nil {
 		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, "file not found")
@@ -187,6 +192,9 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 			err  error
 		}
 
+		parallelCtx, parallelCancel := context.WithCancel(ctx)
+		defer parallelCancel()
+
 		var wg sync.WaitGroup
 		results := make(chan stepResult, 2)
 
@@ -197,7 +205,7 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 				outPath := filepath.Join(artifactsBase, "faces", "result.json")
 				r.logger.Info("running faces pipeline", "job_id", job.ID, "file_id", file.ID)
 
-				result, err := r.pipeRunner.RunFaces(ctx, file.Path, outPath)
+				result, err := r.pipeRunner.RunFaces(parallelCtx, file.Path, outPath)
 				if err != nil {
 					results <- stepResult{"faces", fmt.Errorf("faces pipeline error: %w", err)}
 					return
@@ -222,7 +230,7 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 				outPath := filepath.Join(artifactsBase, "scenes", "result.json")
 				r.logger.Info("running scenes pipeline", "job_id", job.ID, "file_id", file.ID)
 
-				result, err := r.pipeRunner.RunScenes(ctx, file.Path, speechOutPath, outPath)
+				result, err := r.pipeRunner.RunScenes(parallelCtx, file.Path, speechOutPath, outPath)
 				if err != nil {
 					results <- stepResult{"scenes", fmt.Errorf("scenes pipeline error: %w", err)}
 					return
@@ -231,7 +239,7 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 					results <- stepResult{"scenes", fmt.Errorf("scenes pipeline exited %d: %s", result.ExitCode, truncateStr(result.StderrTail, 512))}
 					return
 				}
-				if _, err := r.pipeRunner.ValidateOutput(outPath); err != nil {
+				if _, err := r.pipeRunner.ValidateSceneOutput(outPath); err != nil {
 					results <- stepResult{"scenes", fmt.Errorf("scenes output invalid: %w", err)}
 					return
 				}
@@ -245,13 +253,24 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 			close(results)
 		}()
 
+		var firstErr error
 		for sr := range results {
 			if sr.err != nil {
-				r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, sr.err.Error())
-				return
+				if firstErr == nil {
+					firstErr = sr.err
+					parallelCancel()
+				}
+				continue
 			}
-			completedSteps++
-			r.repo.UpdateJobProgress(ctx, job.ID, completedSteps*100/totalSteps)
+			if firstErr == nil {
+				completedSteps++
+				r.repo.UpdateJobProgress(ctx, job.ID, completedSteps*100/totalSteps)
+			}
+		}
+
+		if firstErr != nil {
+			r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, firstErr.Error())
+			return
 		}
 	}
 

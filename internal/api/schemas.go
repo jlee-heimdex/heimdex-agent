@@ -21,14 +21,20 @@ type StatusResponse struct {
 	JobsRunning  int                     `json:"jobs_running"`
 	ActiveJob    *JobResponse            `json:"active_job,omitempty"`
 	Pipelines    *PipelineStatusResponse `json:"pipelines,omitempty"`
+	Constraints  *ConstraintsResponse    `json:"constraints,omitempty"`
 }
 
 type PipelineStatusResponse struct {
-	HasFaces     bool   `json:"has_faces"`
-	HasSpeech    bool   `json:"has_speech"`
-	LastProbeAt  string `json:"last_probe_at,omitempty"`
-	DepsAvail    int    `json:"deps_available"`
-	DepsTotal    int    `json:"deps_total"`
+	HasFaces    bool   `json:"has_faces"`
+	HasSpeech   bool   `json:"has_speech"`
+	HasScenes   bool   `json:"has_scenes"`
+	LastProbeAt string `json:"last_probe_at,omitempty"`
+	DepsAvail   int    `json:"deps_available"`
+	DepsTotal   int    `json:"deps_total"`
+}
+
+type ConstraintsResponse struct {
+	ScenesRequiresSpeech bool `json:"scenes_requires_speech"`
 }
 
 type AddFolderRequest struct {

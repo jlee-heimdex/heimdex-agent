@@ -40,11 +40,12 @@ type fakePipeRunner struct {
 	facesCalled  atomic.Int32
 	scenesCalled atomic.Int32
 
-	speechFn   func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error)
-	facesFn    func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error)
-	scenesFn   func(ctx context.Context, videoPath, speechResultPath, outPath string) (pipelines.RunResult, error)
-	validateFn func(path string) (*pipelines.PipelineOutput, error)
-	artifacts  string
+	speechFn        func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error)
+	facesFn         func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error)
+	scenesFn        func(ctx context.Context, videoPath, speechResultPath, outPath string) (pipelines.RunResult, error)
+	validateFn      func(path string) (*pipelines.PipelineOutput, error)
+	validateSceneFn func(path string) (*pipelines.PipelineOutput, error)
+	artifacts       string
 }
 
 func (f *fakePipeRunner) RunDoctor(ctx context.Context) (*pipelines.Capabilities, error) {
@@ -88,6 +89,13 @@ func (f *fakePipeRunner) ValidateOutput(path string) (*pipelines.PipelineOutput,
 	return &pipelines.PipelineOutput{SchemaVersion: "1.0", PipelineVersion: "0.2.0", ModelVersion: "test"}, nil
 }
 
+func (f *fakePipeRunner) ValidateSceneOutput(path string) (*pipelines.PipelineOutput, error) {
+	if f.validateSceneFn != nil {
+		return f.validateSceneFn(path)
+	}
+	return f.ValidateOutput(path)
+}
+
 func (f *fakePipeRunner) ArtifactsDir() string {
 	if f.artifacts != "" {
 		return f.artifacts
@@ -117,6 +125,10 @@ func (f *fakeDoctorRunner) RunScenes(ctx context.Context, videoPath, speechResul
 
 func (f *fakeDoctorRunner) ValidateOutput(path string) (*pipelines.PipelineOutput, error) {
 	return &pipelines.PipelineOutput{SchemaVersion: "1.0", PipelineVersion: "0.1.0", ModelVersion: "test"}, nil
+}
+
+func (f *fakeDoctorRunner) ValidateSceneOutput(path string) (*pipelines.PipelineOutput, error) {
+	return f.ValidateOutput(path)
 }
 
 func (f *fakeDoctorRunner) ArtifactsDir() string {
@@ -324,6 +336,103 @@ func TestProcessIndexJob_NoPipelineRunner(t *testing.T) {
 
 	job, _ := createTestJobAndFile(t, repo)
 	runner.processIndexJob(context.Background(), job)
+
+	updatedJob, _ := repo.GetJob(context.Background(), job.ID)
+	if updatedJob.Status != JobStatusFailed {
+		t.Errorf("job status = %s, want %s", updatedJob.Status, JobStatusFailed)
+	}
+}
+
+func TestProcessIndexJob_CancelledContext(t *testing.T) {
+	fake := &fakePipeRunner{}
+	caps := &pipelines.Capabilities{
+		HasSpeech: true,
+		HasFaces:  true,
+		HasScenes: true,
+		ProbedAt:  time.Now(),
+	}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+	job, _ := createTestJobAndFile(t, repo)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	runner.processIndexJob(ctx, job)
+
+	updatedJob, _ := repo.GetJob(context.Background(), job.ID)
+	if updatedJob.Status != JobStatusFailed {
+		t.Errorf("job status = %s, want %s", updatedJob.Status, JobStatusFailed)
+	}
+
+	if fake.speechCalled.Load() != 0 {
+		t.Errorf("speech called %d times, want 0", fake.speechCalled.Load())
+	}
+	if fake.facesCalled.Load() != 0 {
+		t.Errorf("faces called %d times, want 0", fake.facesCalled.Load())
+	}
+	if fake.scenesCalled.Load() != 0 {
+		t.Errorf("scenes called %d times, want 0", fake.scenesCalled.Load())
+	}
+}
+
+func TestProcessIndexJob_FacesFailsScenesStillDrains(t *testing.T) {
+	scenesExited := make(chan struct{})
+
+	fake := &fakePipeRunner{
+		facesFn: func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error) {
+			return pipelines.RunResult{ExitCode: 1, StderrTail: "faces failed"}, nil
+		},
+		scenesFn: func(ctx context.Context, videoPath, speechResultPath, outPath string) (pipelines.RunResult, error) {
+			defer close(scenesExited)
+
+			select {
+			case <-ctx.Done():
+				return pipelines.RunResult{}, ctx.Err()
+			case <-time.After(100 * time.Millisecond):
+				if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+					return pipelines.RunResult{}, err
+				}
+				if err := os.WriteFile(outPath, []byte(`{
+					"schema_version":"1.0",
+					"pipeline_version":"0.2.0",
+					"model_version":"ffmpeg-scenecut",
+					"video_id":"video-1",
+					"scenes":[]
+				}`), 0644); err != nil {
+					return pipelines.RunResult{}, err
+				}
+				return pipelines.RunResult{ExitCode: 0, OutputPath: outPath}, nil
+			}
+		},
+	}
+	caps := &pipelines.Capabilities{
+		HasSpeech: true,
+		HasFaces:  true,
+		HasScenes: true,
+		ProbedAt:  time.Now(),
+	}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+	job, _ := createTestJobAndFile(t, repo)
+
+	done := make(chan struct{})
+	go func() {
+		runner.processIndexJob(context.Background(), job)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("processIndexJob did not complete")
+	}
+
+	select {
+	case <-scenesExited:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("scenes goroutine did not exit")
+	}
 
 	updatedJob, _ := repo.GetJob(context.Background(), job.ID)
 	if updatedJob.Status != JobStatusFailed {

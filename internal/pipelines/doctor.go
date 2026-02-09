@@ -42,6 +42,12 @@ func (d *CachedDoctor) Get(ctx context.Context) (*Capabilities, error) {
 	return d.Refresh(ctx)
 }
 
+func (d *CachedDoctor) Peek() *Capabilities {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.cached
+}
+
 // Refresh forces a new doctor probe regardless of cache freshness.
 func (d *CachedDoctor) Refresh(ctx context.Context) (*Capabilities, error) {
 	d.mu.Lock()
