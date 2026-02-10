@@ -325,9 +325,10 @@ func (r *SubprocessRunner) exec(ctx context.Context, outPath string, args ...str
 	cmd.Stderr = io.Writer(&limitedWriter{w: &stderrBuf, limit: maxStderrBytes})
 	cmd.Stdout = io.Discard // CLI writes to --out file, not stdout
 
+	deadline, _ := ctx.Deadline()
 	r.cfg.Logger.Info("executing pipeline command",
 		"args", cmdArgs,
-		"timeout", ctx.Deadline,
+		"timeout", deadline.Format(time.RFC3339),
 	)
 
 	err := cmd.Run()

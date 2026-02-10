@@ -25,6 +25,9 @@ const (
 	EnvPipelinesPython = "HEIMDEX_PIPELINES_PYTHON"
 	EnvPipelinesModule = "HEIMDEX_PIPELINES_MODULE"
 
+	// UI environment variable names
+	EnvHeadless = "HEIMDEX_HEADLESS"
+
 	// Cloud sync environment variable names
 	EnvCloudEnabled   = "HEIMDEX_CLOUD_ENABLED"
 	EnvCloudBaseURL   = "HEIMDEX_CLOUD_BASE_URL"
@@ -60,6 +63,7 @@ type Config interface {
 	PipelinesTimeoutSpeech() time.Duration
 	PipelinesTimeoutFaces() time.Duration
 	PipelinesTimeoutScenes() time.Duration
+	Headless() bool
 	CloudEnabled() bool
 	CloudBaseURL() string
 	CloudToken() string
@@ -76,6 +80,8 @@ type EnvConfig struct {
 
 	pipelinesPython string
 	pipelinesModule string
+
+	headless bool
 
 	cloudEnabled   bool
 	cloudBaseURL   string
@@ -119,6 +125,10 @@ func New() (*EnvConfig, error) {
 
 	if pm := os.Getenv(EnvPipelinesModule); pm != "" {
 		cfg.pipelinesModule = pm
+	}
+
+	if h := os.Getenv(EnvHeadless); h == "true" || h == "1" {
+		cfg.headless = true
 	}
 
 	if ce := os.Getenv(EnvCloudEnabled); ce == "true" || ce == "1" {
@@ -187,6 +197,10 @@ func (c *EnvConfig) PipelinesTimeoutFaces() time.Duration {
 
 func (c *EnvConfig) PipelinesTimeoutScenes() time.Duration {
 	return time.Duration(DefaultPipelinesTimeoutScenes) * time.Second
+}
+
+func (c *EnvConfig) Headless() bool {
+	return c.headless
 }
 
 func (c *EnvConfig) CloudEnabled() bool {

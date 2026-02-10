@@ -158,19 +158,6 @@ func run() error {
 
 	quitCh := make(chan struct{})
 
-	tray := ui.NewTray(ui.TrayConfig{
-		CatalogService: catalogSvc,
-		Runner:         runner,
-		Logger:         logger,
-		OnAddFolder: func() error {
-			logger.Info("add folder requested from tray (file dialog not implemented in v0)")
-			return nil
-		},
-		OnQuit: func() {
-			close(quitCh)
-		},
-	})
-
 	go func() {
 		select {
 		case sig := <-sigCh:
@@ -180,7 +167,23 @@ func run() error {
 		}
 	}()
 
-	go tray.Run()
+	if cfg.Headless() {
+		logger.Info("running in headless mode (no system tray)")
+	} else {
+		tray := ui.NewTray(ui.TrayConfig{
+			CatalogService: catalogSvc,
+			Runner:         runner,
+			Logger:         logger,
+			OnAddFolder: func() error {
+				logger.Info("add folder requested from tray (file dialog not implemented in v0)")
+				return nil
+			},
+			OnQuit: func() {
+				close(quitCh)
+			},
+		})
+		go tray.Run()
+	}
 
 	<-quitCh
 
