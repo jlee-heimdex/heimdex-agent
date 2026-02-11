@@ -298,6 +298,30 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 	}
 }
 
+// buildSceneIngestDocs converts pipeline SceneBoundary output into the cloud
+// ingest payload. This is the single mapping point — every field the SaaS
+// accepts should be forwarded here.  Missing fields in older pipeline outputs
+// default safely (empty string / empty slice / zero).
+func buildSceneIngestDocs(scenes []pipelines.SceneBoundary) []cloud.SceneIngestDoc {
+	docs := make([]cloud.SceneIngestDoc, 0, len(scenes))
+	for _, s := range scenes {
+		docs = append(docs, cloud.SceneIngestDoc{
+			SceneID:             s.SceneID,
+			Index:               s.Index,
+			StartMs:             s.StartMs,
+			EndMs:               s.EndMs,
+			KeyframeTimestampMs: s.KeyframeTimestampMs,
+			TranscriptRaw:       s.TranscriptRaw,
+			SpeechSegmentCount:  s.SpeechSegmentCount,
+			PeopleClusterIDs:    s.PeopleClusterIDs,
+			KeywordTags:         s.KeywordTags,
+			ProductTags:         s.ProductTags,
+			ProductEntities:     s.ProductEntities,
+		})
+	}
+	return docs
+}
+
 func (r *Runner) uploadScenesToCloud(ctx context.Context, job *Job, file *File, artifactsBase string) {
 	scenePath := filepath.Join(artifactsBase, "scenes", "result.json")
 
@@ -318,21 +342,14 @@ func (r *Runner) uploadScenesToCloud(ctx context.Context, job *Job, file *File, 
 		return
 	}
 
-	scenes := make([]cloud.SceneIngestDoc, 0, len(sceneOutput.Scenes))
-	for i, s := range sceneOutput.Scenes {
-		scenes = append(scenes, cloud.SceneIngestDoc{
-			SceneID: s.SceneID,
-			Index:   i,
-			StartMs: s.StartMs,
-			EndMs:   s.EndMs,
-		})
-	}
+	scenes := buildSceneIngestDocs(sceneOutput.Scenes)
 
 	payload := cloud.SceneIngestPayload{
 		VideoID:         sceneOutput.VideoID,
 		LibraryID:       r.libraryID,
 		PipelineVersion: sceneOutput.PipelineVersion,
 		ModelVersion:    sceneOutput.ModelVersion,
+		TotalDurationMs: sceneOutput.TotalDurationMs,
 		Scenes:          scenes,
 	}
 
@@ -443,21 +460,14 @@ func (r *Runner) uploadScenesToCloudRetry(ctx context.Context, job *Job, file *F
 		return
 	}
 
-	scenes := make([]cloud.SceneIngestDoc, 0, len(sceneOutput.Scenes))
-	for i, s := range sceneOutput.Scenes {
-		scenes = append(scenes, cloud.SceneIngestDoc{
-			SceneID: s.SceneID,
-			Index:   i,
-			StartMs: s.StartMs,
-			EndMs:   s.EndMs,
-		})
-	}
+	scenes := buildSceneIngestDocs(sceneOutput.Scenes)
 
 	payload := cloud.SceneIngestPayload{
 		VideoID:         sceneOutput.VideoID,
 		LibraryID:       r.libraryID,
 		PipelineVersion: sceneOutput.PipelineVersion,
 		ModelVersion:    sceneOutput.ModelVersion,
+		TotalDurationMs: sceneOutput.TotalDurationMs,
 		Scenes:          scenes,
 	}
 

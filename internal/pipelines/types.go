@@ -77,14 +77,23 @@ type PipelineOutput struct {
 
 type SceneOutputPayload struct {
 	PipelineOutput
-	VideoID string          `json:"video_id"`
-	Scenes  []SceneBoundary `json:"scenes"`
+	VideoID         string          `json:"video_id"`
+	TotalDurationMs int             `json:"total_duration_ms"`
+	Scenes          []SceneBoundary `json:"scenes"`
 }
 
 type SceneBoundary struct {
-	SceneID string `json:"scene_id"`
-	StartMs int    `json:"start_ms"`
-	EndMs   int    `json:"end_ms"`
+	SceneID             string   `json:"scene_id"`
+	Index               int      `json:"index"`
+	StartMs             int      `json:"start_ms"`
+	EndMs               int      `json:"end_ms"`
+	KeyframeTimestampMs int      `json:"keyframe_timestamp_ms"`
+	TranscriptRaw       string   `json:"transcript_raw"`
+	SpeechSegmentCount  int      `json:"speech_segment_count"`
+	PeopleClusterIDs    []string `json:"people_cluster_ids"`
+	KeywordTags         []string `json:"keyword_tags"`
+	ProductTags         []string `json:"product_tags"`
+	ProductEntities     []string `json:"product_entities"`
 }
 
 // RequiredFieldsPresent checks the hard invariants the agent enforces.

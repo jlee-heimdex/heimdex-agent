@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -464,20 +465,37 @@ func (f *fakeCloudClient) RegisterDevice(deviceID string) error { return nil }
 
 func writeSceneResult(t *testing.T, artifactsDir, fileID string) {
 	t.Helper()
+	writeSceneResultWithPayload(t, artifactsDir, fileID, pipelines.SceneOutputPayload{
+		PipelineOutput: pipelines.PipelineOutput{
+			SchemaVersion:   "1.0",
+			PipelineVersion: "0.3.0",
+			ModelVersion:    "ffmpeg-scenecut",
+		},
+		VideoID:         "video-1",
+		TotalDurationMs: 60000,
+		Scenes: []pipelines.SceneBoundary{
+			{
+				SceneID:             "video-1_scene_0",
+				Index:               0,
+				StartMs:             0,
+				EndMs:               5000,
+				KeyframeTimestampMs: 2500,
+				TranscriptRaw:       "지금 이 수분크림을 소개합니다",
+				SpeechSegmentCount:  2,
+				PeopleClusterIDs:    []string{"cluster-abc", "cluster-def"},
+				KeywordTags:         []string{"cta", "feature"},
+				ProductTags:         []string{"skincare"},
+				ProductEntities:     []string{"수분크림"},
+			},
+		},
+	})
+}
+
+func writeSceneResultWithPayload(t *testing.T, artifactsDir, fileID string, payload pipelines.SceneOutputPayload) {
+	t.Helper()
 	scenesDir := filepath.Join(artifactsDir, fileID, "scenes")
 	if err := os.MkdirAll(scenesDir, 0755); err != nil {
 		t.Fatalf("mkdir scenes: %v", err)
-	}
-	payload := pipelines.SceneOutputPayload{
-		PipelineOutput: pipelines.PipelineOutput{
-			SchemaVersion:   "1.0",
-			PipelineVersion: "0.2.0",
-			ModelVersion:    "ffmpeg-scenecut",
-		},
-		VideoID: "video-1",
-		Scenes: []pipelines.SceneBoundary{
-			{SceneID: "video-1_scene_0", StartMs: 0, EndMs: 5000},
-		},
 	}
 	data, _ := json.Marshal(payload)
 	if err := os.WriteFile(filepath.Join(scenesDir, "result.json"), data, 0644); err != nil {
@@ -637,6 +655,275 @@ func TestUploadBackoff(t *testing.T) {
 	}
 }
 
+func TestBuildSceneIngestDocs_PropagatesAllFields(t *testing.T) {
+	input := []pipelines.SceneBoundary{
+		{
+			SceneID:             "vid_scene_0",
+			Index:               0,
+			StartMs:             0,
+			EndMs:               5000,
+			KeyframeTimestampMs: 2500,
+			TranscriptRaw:       "hello world",
+			SpeechSegmentCount:  3,
+			PeopleClusterIDs:    []string{"p1", "p2"},
+			KeywordTags:         []string{"cta", "price"},
+			ProductTags:         []string{"skincare"},
+			ProductEntities:     []string{"세럼", "수분크림"},
+		},
+		{
+			SceneID:             "vid_scene_1",
+			Index:               1,
+			StartMs:             5000,
+			EndMs:               12000,
+			KeyframeTimestampMs: 8000,
+			TranscriptRaw:       "second scene transcript",
+			SpeechSegmentCount:  1,
+			PeopleClusterIDs:    nil,
+			KeywordTags:         nil,
+			ProductTags:         nil,
+			ProductEntities:     nil,
+		},
+	}
+
+	docs := buildSceneIngestDocs(input)
+
+	if len(docs) != 2 {
+		t.Fatalf("got %d docs, want 2", len(docs))
+	}
+
+	d := docs[0]
+	if d.SceneID != "vid_scene_0" {
+		t.Errorf("SceneID = %q, want %q", d.SceneID, "vid_scene_0")
+	}
+	if d.Index != 0 {
+		t.Errorf("Index = %d, want 0", d.Index)
+	}
+	if d.StartMs != 0 || d.EndMs != 5000 {
+		t.Errorf("StartMs/EndMs = %d/%d, want 0/5000", d.StartMs, d.EndMs)
+	}
+	if d.KeyframeTimestampMs != 2500 {
+		t.Errorf("KeyframeTimestampMs = %d, want 2500", d.KeyframeTimestampMs)
+	}
+	if d.TranscriptRaw != "hello world" {
+		t.Errorf("TranscriptRaw = %q, want %q", d.TranscriptRaw, "hello world")
+	}
+	if d.SpeechSegmentCount != 3 {
+		t.Errorf("SpeechSegmentCount = %d, want 3", d.SpeechSegmentCount)
+	}
+	if len(d.PeopleClusterIDs) != 2 || d.PeopleClusterIDs[0] != "p1" || d.PeopleClusterIDs[1] != "p2" {
+		t.Errorf("PeopleClusterIDs = %v, want [p1 p2]", d.PeopleClusterIDs)
+	}
+	if len(d.KeywordTags) != 2 || d.KeywordTags[0] != "cta" || d.KeywordTags[1] != "price" {
+		t.Errorf("KeywordTags = %v, want [cta price]", d.KeywordTags)
+	}
+	if len(d.ProductTags) != 1 || d.ProductTags[0] != "skincare" {
+		t.Errorf("ProductTags = %v, want [skincare]", d.ProductTags)
+	}
+	if len(d.ProductEntities) != 2 || d.ProductEntities[0] != "세럼" {
+		t.Errorf("ProductEntities = %v, want [세럼 수분크림]", d.ProductEntities)
+	}
+
+	d1 := docs[1]
+	if d1.TranscriptRaw != "second scene transcript" {
+		t.Errorf("docs[1].TranscriptRaw = %q, want %q", d1.TranscriptRaw, "second scene transcript")
+	}
+	if d1.PeopleClusterIDs != nil {
+		t.Errorf("docs[1].PeopleClusterIDs = %v, want nil (omitempty safe)", d1.PeopleClusterIDs)
+	}
+	if d1.KeywordTags != nil {
+		t.Errorf("docs[1].KeywordTags = %v, want nil", d1.KeywordTags)
+	}
+	if d1.ProductTags != nil {
+		t.Errorf("docs[1].ProductTags = %v, want nil", d1.ProductTags)
+	}
+	if d1.ProductEntities != nil {
+		t.Errorf("docs[1].ProductEntities = %v, want nil", d1.ProductEntities)
+	}
+}
+
+func TestBuildSceneIngestDocs_EmptyInput(t *testing.T) {
+	docs := buildSceneIngestDocs(nil)
+	if len(docs) != 0 {
+		t.Errorf("got %d docs for nil input, want 0", len(docs))
+	}
+	docs = buildSceneIngestDocs([]pipelines.SceneBoundary{})
+	if len(docs) != 0 {
+		t.Errorf("got %d docs for empty input, want 0", len(docs))
+	}
+}
+
+func TestBuildSceneIngestDocs_BackwardCompat_MissingFields(t *testing.T) {
+	input := []pipelines.SceneBoundary{
+		{SceneID: "vid_scene_0", StartMs: 0, EndMs: 5000},
+	}
+	docs := buildSceneIngestDocs(input)
+	if len(docs) != 1 {
+		t.Fatalf("got %d docs, want 1", len(docs))
+	}
+	d := docs[0]
+	if d.TranscriptRaw != "" {
+		t.Errorf("TranscriptRaw = %q, want empty string", d.TranscriptRaw)
+	}
+	if d.SpeechSegmentCount != 0 {
+		t.Errorf("SpeechSegmentCount = %d, want 0", d.SpeechSegmentCount)
+	}
+	if d.PeopleClusterIDs != nil {
+		t.Errorf("PeopleClusterIDs = %v, want nil", d.PeopleClusterIDs)
+	}
+	if d.KeyframeTimestampMs != 0 {
+		t.Errorf("KeyframeTimestampMs = %d, want 0", d.KeyframeTimestampMs)
+	}
+	if d.KeywordTags != nil {
+		t.Errorf("KeywordTags = %v, want nil", d.KeywordTags)
+	}
+	if d.ProductTags != nil {
+		t.Errorf("ProductTags = %v, want nil", d.ProductTags)
+	}
+	if d.ProductEntities != nil {
+		t.Errorf("ProductEntities = %v, want nil", d.ProductEntities)
+	}
+}
+
+func TestUploadScenesToCloud_PropagatesFieldsToPayload(t *testing.T) {
+	fake := &fakePipeRunner{}
+	caps := &pipelines.Capabilities{HasSpeech: true, HasFaces: true, HasScenes: true, ProbedAt: time.Now()}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+
+	tmpDir := t.TempDir()
+	fake.artifacts = tmpDir
+
+	var captured cloud.SceneIngestPayload
+	cc := &fakeCloudClient{scenes: &fakeSceneUploader{
+		uploadFn: func(_ context.Context, p cloud.SceneIngestPayload) error {
+			captured = p
+			return nil
+		},
+	}}
+	runner.SetCloudClient(cc, "lib-1")
+
+	_, file := createTestJobAndFile(t, repo)
+	writeSceneResult(t, tmpDir, file.ID)
+
+	job := &Job{
+		ID:        NewID(),
+		Type:      JobTypeIndex,
+		Status:    JobStatusRunning,
+		FileID:    file.ID,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := repo.CreateJob(context.Background(), job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	runner.uploadScenesToCloud(context.Background(), job, file, filepath.Join(tmpDir, file.ID))
+
+	if captured.VideoID != "video-1" {
+		t.Errorf("payload.VideoID = %q, want %q", captured.VideoID, "video-1")
+	}
+	if captured.TotalDurationMs != 60000 {
+		t.Errorf("payload.TotalDurationMs = %d, want 60000", captured.TotalDurationMs)
+	}
+	if len(captured.Scenes) != 1 {
+		t.Fatalf("payload.Scenes count = %d, want 1", len(captured.Scenes))
+	}
+
+	s := captured.Scenes[0]
+	if s.TranscriptRaw != "지금 이 수분크림을 소개합니다" {
+		t.Errorf("TranscriptRaw = %q, want Korean transcript", s.TranscriptRaw)
+	}
+	if s.SpeechSegmentCount != 2 {
+		t.Errorf("SpeechSegmentCount = %d, want 2", s.SpeechSegmentCount)
+	}
+	if len(s.PeopleClusterIDs) != 2 {
+		t.Errorf("PeopleClusterIDs = %v, want [cluster-abc cluster-def]", s.PeopleClusterIDs)
+	}
+	if s.KeyframeTimestampMs != 2500 {
+		t.Errorf("KeyframeTimestampMs = %d, want 2500", s.KeyframeTimestampMs)
+	}
+	if len(s.KeywordTags) != 2 || s.KeywordTags[0] != "cta" || s.KeywordTags[1] != "feature" {
+		t.Errorf("KeywordTags = %v, want [cta feature]", s.KeywordTags)
+	}
+	if len(s.ProductTags) != 1 || s.ProductTags[0] != "skincare" {
+		t.Errorf("ProductTags = %v, want [skincare]", s.ProductTags)
+	}
+	if len(s.ProductEntities) != 1 || s.ProductEntities[0] != "수분크림" {
+		t.Errorf("ProductEntities = %v, want [수분크림]", s.ProductEntities)
+	}
+}
+
+func TestUploadScenesToCloud_OlderPipelineOutput_StillWorks(t *testing.T) {
+	fake := &fakePipeRunner{}
+	caps := &pipelines.Capabilities{HasSpeech: true, HasFaces: true, HasScenes: true, ProbedAt: time.Now()}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+
+	tmpDir := t.TempDir()
+	fake.artifacts = tmpDir
+
+	var captured cloud.SceneIngestPayload
+	cc := &fakeCloudClient{scenes: &fakeSceneUploader{
+		uploadFn: func(_ context.Context, p cloud.SceneIngestPayload) error {
+			captured = p
+			return nil
+		},
+	}}
+	runner.SetCloudClient(cc, "lib-1")
+
+	_, file := createTestJobAndFile(t, repo)
+
+	writeSceneResultWithPayload(t, tmpDir, file.ID, pipelines.SceneOutputPayload{
+		PipelineOutput: pipelines.PipelineOutput{
+			SchemaVersion:   "1.0",
+			PipelineVersion: "0.1.0",
+			ModelVersion:    "ffmpeg-scenecut",
+		},
+		VideoID: "old-video",
+		Scenes: []pipelines.SceneBoundary{
+			{SceneID: "old-video_scene_0", StartMs: 0, EndMs: 3000},
+		},
+	})
+
+	job := &Job{
+		ID:        NewID(),
+		Type:      JobTypeIndex,
+		Status:    JobStatusRunning,
+		FileID:    file.ID,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := repo.CreateJob(context.Background(), job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	runner.uploadScenesToCloud(context.Background(), job, file, filepath.Join(tmpDir, file.ID))
+
+	if captured.VideoID != "old-video" {
+		t.Fatalf("upload not called or wrong video_id: %q", captured.VideoID)
+	}
+
+	s := captured.Scenes[0]
+	if s.TranscriptRaw != "" {
+		t.Errorf("TranscriptRaw = %q, want empty for old pipeline output", s.TranscriptRaw)
+	}
+	if s.SpeechSegmentCount != 0 {
+		t.Errorf("SpeechSegmentCount = %d, want 0 for old pipeline output", s.SpeechSegmentCount)
+	}
+	if s.PeopleClusterIDs != nil {
+		t.Errorf("PeopleClusterIDs = %v, want nil for old pipeline output", s.PeopleClusterIDs)
+	}
+	if s.KeywordTags != nil {
+		t.Errorf("KeywordTags = %v, want nil for old pipeline output", s.KeywordTags)
+	}
+	if s.ProductTags != nil {
+		t.Errorf("ProductTags = %v, want nil for old pipeline output", s.ProductTags)
+	}
+	if s.ProductEntities != nil {
+		t.Errorf("ProductEntities = %v, want nil for old pipeline output", s.ProductEntities)
+	}
+}
+
 func TestProcessUploadScenesJob_RespectsBackoff(t *testing.T) {
 	fake := &fakePipeRunner{}
 	caps := &pipelines.Capabilities{HasSpeech: true, HasFaces: true, HasScenes: true, ProbedAt: time.Now()}
@@ -681,5 +968,115 @@ func TestProcessUploadScenesJob_RespectsBackoff(t *testing.T) {
 	updatedJob, _ := repo.GetJob(context.Background(), job.ID)
 	if updatedJob.Status != JobStatusPending {
 		t.Errorf("job should remain pending during backoff, got %s", updatedJob.Status)
+	}
+}
+
+func TestSceneBoundary_JSONUnmarshal_WithTags(t *testing.T) {
+	raw := `{
+		"scene_id": "vid_scene_0",
+		"index": 0,
+		"start_ms": 0,
+		"end_ms": 5000,
+		"keyframe_timestamp_ms": 2500,
+		"transcript_raw": "지금 세럼 소개",
+		"speech_segment_count": 1,
+		"people_cluster_ids": [],
+		"keyword_tags": ["cta", "feature"],
+		"product_tags": ["skincare"],
+		"product_entities": ["세럼"]
+	}`
+
+	var sb pipelines.SceneBoundary
+	if err := json.Unmarshal([]byte(raw), &sb); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	if len(sb.KeywordTags) != 2 || sb.KeywordTags[0] != "cta" {
+		t.Errorf("KeywordTags = %v, want [cta feature]", sb.KeywordTags)
+	}
+	if len(sb.ProductTags) != 1 || sb.ProductTags[0] != "skincare" {
+		t.Errorf("ProductTags = %v, want [skincare]", sb.ProductTags)
+	}
+	if len(sb.ProductEntities) != 1 || sb.ProductEntities[0] != "세럼" {
+		t.Errorf("ProductEntities = %v, want [세럼]", sb.ProductEntities)
+	}
+}
+
+func TestSceneBoundary_JSONUnmarshal_WithoutTags(t *testing.T) {
+	raw := `{
+		"scene_id": "vid_scene_0",
+		"index": 0,
+		"start_ms": 0,
+		"end_ms": 5000
+	}`
+
+	var sb pipelines.SceneBoundary
+	if err := json.Unmarshal([]byte(raw), &sb); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	if sb.KeywordTags != nil {
+		t.Errorf("KeywordTags = %v, want nil for missing field", sb.KeywordTags)
+	}
+	if sb.ProductTags != nil {
+		t.Errorf("ProductTags = %v, want nil for missing field", sb.ProductTags)
+	}
+	if sb.ProductEntities != nil {
+		t.Errorf("ProductEntities = %v, want nil for missing field", sb.ProductEntities)
+	}
+}
+
+func TestSceneIngestDoc_JSONMarshal_OmitsEmptyTags(t *testing.T) {
+	doc := cloud.SceneIngestDoc{
+		SceneID: "vid_scene_0",
+		Index:   0,
+		StartMs: 0,
+		EndMs:   5000,
+	}
+
+	data, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	raw := string(data)
+	if strings.Contains(raw, "keyword_tags") {
+		t.Error("nil KeywordTags should be omitted from JSON")
+	}
+	if strings.Contains(raw, "product_tags") {
+		t.Error("nil ProductTags should be omitted from JSON")
+	}
+	if strings.Contains(raw, "product_entities") {
+		t.Error("nil ProductEntities should be omitted from JSON")
+	}
+}
+
+func TestSceneIngestDoc_JSONMarshal_IncludesTags(t *testing.T) {
+	doc := cloud.SceneIngestDoc{
+		SceneID:         "vid_scene_0",
+		Index:           0,
+		StartMs:         0,
+		EndMs:           5000,
+		KeywordTags:     []string{"cta"},
+		ProductTags:     []string{"skincare"},
+		ProductEntities: []string{"세럼"},
+	}
+
+	data, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	json.Unmarshal(data, &parsed)
+
+	if _, ok := parsed["keyword_tags"]; !ok {
+		t.Error("KeywordTags should be present in JSON when non-nil")
+	}
+	if _, ok := parsed["product_tags"]; !ok {
+		t.Error("ProductTags should be present in JSON when non-nil")
+	}
+	if _, ok := parsed["product_entities"]; !ok {
+		t.Error("ProductEntities should be present in JSON when non-nil")
 	}
 }

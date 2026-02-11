@@ -20,6 +20,9 @@ type SceneIngestDoc struct {
 	TranscriptRaw         string   `json:"transcript_raw,omitempty"`
 	SpeechSegmentCount    int      `json:"speech_segment_count,omitempty"`
 	PeopleClusterIDs      []string `json:"people_cluster_ids,omitempty"`
+	KeywordTags           []string `json:"keyword_tags,omitempty"`
+	ProductTags           []string `json:"product_tags,omitempty"`
+	ProductEntities       []string `json:"product_entities,omitempty"`
 	SourceType            string   `json:"source_type,omitempty"`
 	RequiredDriveNickname string   `json:"required_drive_nickname,omitempty"`
 }
