@@ -592,7 +592,7 @@ type fakeRunner struct {
 	doctorFn        func(ctx context.Context) (*Capabilities, error)
 	speechFn        func(ctx context.Context, videoPath, outPath string) (RunResult, error)
 	facesFn         func(ctx context.Context, videoPath, outPath string) (RunResult, error)
-	scenesFn        func(ctx context.Context, videoPath, speechResultPath, outPath string) (RunResult, error)
+	scenesFn        func(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (RunResult, error)
 	validateFn      func(path string) (*PipelineOutput, error)
 	validateSceneFn func(path string) (*PipelineOutput, error)
 }
@@ -615,9 +615,9 @@ func (f *fakeRunner) RunFaces(ctx context.Context, videoPath, outPath string) (R
 	return RunResult{ExitCode: 0, OutputPath: outPath}, nil
 }
 
-func (f *fakeRunner) RunScenes(ctx context.Context, videoPath, speechResultPath, outPath string) (RunResult, error) {
+func (f *fakeRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (RunResult, error) {
 	if f.scenesFn != nil {
-		return f.scenesFn(ctx, videoPath, speechResultPath, outPath)
+		return f.scenesFn(ctx, videoPath, videoID, speechResultPath, outPath)
 	}
 	return RunResult{ExitCode: 0, OutputPath: outPath}, nil
 }

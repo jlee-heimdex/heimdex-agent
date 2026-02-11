@@ -100,6 +100,7 @@ func run() error {
 		DoctorTimeout: cfg.PipelinesTimeoutDoctor(),
 		SpeechTimeout: cfg.PipelinesTimeoutSpeech(),
 		FacesTimeout:  cfg.PipelinesTimeoutFaces(),
+		ScenesTimeout: cfg.PipelinesTimeoutScenes(),
 		Logger:        logger,
 	}
 

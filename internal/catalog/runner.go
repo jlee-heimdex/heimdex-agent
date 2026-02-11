@@ -246,7 +246,7 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 				outPath := filepath.Join(artifactsBase, "scenes", "result.json")
 				r.logger.Info("running scenes pipeline", "job_id", job.ID, "file_id", file.ID)
 
-				result, err := r.pipeRunner.RunScenes(parallelCtx, file.Path, speechOutPath, outPath)
+				result, err := r.pipeRunner.RunScenes(parallelCtx, file.Path, file.ID, speechOutPath, outPath)
 				if err != nil {
 					results <- stepResult{"scenes", fmt.Errorf("scenes pipeline error: %w", err)}
 					return

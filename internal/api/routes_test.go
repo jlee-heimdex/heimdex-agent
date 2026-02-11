@@ -313,7 +313,7 @@ func (f *fakeDoctorPipelineRunner) RunFaces(ctx context.Context, videoPath, outP
 	return pipelines.RunResult{}, nil
 }
 
-func (f *fakeDoctorPipelineRunner) RunScenes(ctx context.Context, videoPath, speechResultPath, outPath string) (pipelines.RunResult, error) {
+func (f *fakeDoctorPipelineRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (pipelines.RunResult, error) {
 	return pipelines.RunResult{}, nil
 }
 

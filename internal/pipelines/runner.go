@@ -37,7 +37,8 @@ type Runner interface {
 
 	// RunScenes executes the scene detection pipeline for a video file.
 	// It requires the speech result path so scenes can aggregate transcripts.
-	RunScenes(ctx context.Context, videoPath, speechResultPath, outPath string) (RunResult, error)
+	// videoID is used to construct scene_id values in the output.
+	RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (RunResult, error)
 
 	// ValidateOutput reads a pipeline output JSON and checks required fields.
 	ValidateOutput(path string) (*PipelineOutput, error)
@@ -194,13 +195,14 @@ func (r *SubprocessRunner) RunFaces(ctx context.Context, videoPath, outPath stri
 	return result, nil
 }
 
-func (r *SubprocessRunner) RunScenes(ctx context.Context, videoPath, speechResultPath, outPath string) (RunResult, error) {
+func (r *SubprocessRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (RunResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.ScenesTimeout)
 	defer cancel()
 
 	result := r.exec(ctx, outPath,
 		"scenes", "pipeline",
 		"--video", videoPath,
+		"--video-id", videoID,
 		"--speech-result", speechResultPath,
 		"--out", outPath,
 	)

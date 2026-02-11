@@ -45,7 +45,7 @@ type fakePipeRunner struct {
 
 	speechFn        func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error)
 	facesFn         func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error)
-	scenesFn        func(ctx context.Context, videoPath, speechResultPath, outPath string) (pipelines.RunResult, error)
+	scenesFn        func(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (pipelines.RunResult, error)
 	validateFn      func(path string) (*pipelines.PipelineOutput, error)
 	validateSceneFn func(path string) (*pipelines.PipelineOutput, error)
 	artifacts       string
@@ -75,10 +75,10 @@ func (f *fakePipeRunner) RunFaces(ctx context.Context, videoPath, outPath string
 	return pipelines.RunResult{ExitCode: 0, OutputPath: outPath, Duration: 50 * time.Millisecond}, nil
 }
 
-func (f *fakePipeRunner) RunScenes(ctx context.Context, videoPath, speechResultPath, outPath string) (pipelines.RunResult, error) {
+func (f *fakePipeRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (pipelines.RunResult, error) {
 	f.scenesCalled.Add(1)
 	if f.scenesFn != nil {
-		return f.scenesFn(ctx, videoPath, speechResultPath, outPath)
+		return f.scenesFn(ctx, videoPath, videoID, speechResultPath, outPath)
 	}
 	os.MkdirAll(filepath.Dir(outPath), 0755)
 	os.WriteFile(outPath, []byte(`{"schema_version":"1.0","pipeline_version":"0.2.0","model_version":"ffmpeg-scenecut"}`), 0644)
@@ -122,7 +122,7 @@ func (f *fakeDoctorRunner) RunFaces(ctx context.Context, videoPath, outPath stri
 	return pipelines.RunResult{}, nil
 }
 
-func (f *fakeDoctorRunner) RunScenes(ctx context.Context, videoPath, speechResultPath, outPath string) (pipelines.RunResult, error) {
+func (f *fakeDoctorRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (pipelines.RunResult, error) {
 	return pipelines.RunResult{}, nil
 }
 
@@ -386,7 +386,7 @@ func TestProcessIndexJob_FacesFailsScenesStillDrains(t *testing.T) {
 		facesFn: func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error) {
 			return pipelines.RunResult{ExitCode: 1, StderrTail: "faces failed"}, nil
 		},
-		scenesFn: func(ctx context.Context, videoPath, speechResultPath, outPath string) (pipelines.RunResult, error) {
+		scenesFn: func(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (pipelines.RunResult, error) {
 			defer close(scenesExited)
 
 			select {
