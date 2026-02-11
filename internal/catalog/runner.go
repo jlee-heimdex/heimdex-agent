@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,12 +48,68 @@ func (r *Runner) SetCloudClient(client cloud.Client, libraryID string) {
 	r.libraryID = libraryID
 }
 
+func (r *Runner) backfillCloudUploads(ctx context.Context) {
+	jobs, err := r.repo.ListJobs(ctx, 10000)
+	if err != nil {
+		r.logger.Warn("backfill: cannot list jobs", "error", err)
+		return
+	}
+
+	completedIndex := make(map[string]bool)
+	hasUpload := make(map[string]bool)
+	for _, j := range jobs {
+		if j.Type == JobTypeIndex && j.Status == JobStatusCompleted && j.FileID != "" {
+			completedIndex[j.FileID] = true
+		}
+		if j.Type == JobTypeUploadScenes && j.FileID != "" {
+			hasUpload[j.FileID] = true
+		}
+	}
+
+	created := 0
+	for fileID := range completedIndex {
+		if hasUpload[fileID] {
+			continue
+		}
+		scenePath := filepath.Join(r.pipeRunner.ArtifactsDir(), fileID, "scenes", "result.json")
+		if _, err := os.Stat(scenePath); err != nil {
+			continue
+		}
+		now := time.Now()
+		job := &Job{
+			ID:        NewID(),
+			Type:      JobTypeUploadScenes,
+			Status:    JobStatusPending,
+			FileID:    fileID,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		if err := r.repo.CreateJob(ctx, job); err != nil {
+			r.logger.Warn("backfill: cannot create upload job", "file_id", fileID, "error", err)
+			continue
+		}
+		created++
+	}
+
+	r.logger.Info("backfill: scan complete",
+		"completed_index_jobs", len(completedIndex),
+		"already_uploaded", len(hasUpload),
+		"created", created,
+	)
+}
+
 func (r *Runner) Start(ctx context.Context) {
 	if r.running.Swap(true) {
 		return
 	}
 
 	r.logger.Info("job runner started")
+
+	// Retroactively create upload_scenes jobs for files that were indexed
+	// before cloud was enabled.  This is a one-shot best-effort pass.
+	if r.cloudClient != nil && r.pipeRunner != nil {
+		r.backfillCloudUploads(ctx)
+	}
 
 	ticker := time.NewTicker(r.pollInterval)
 	defer ticker.Stop()
@@ -346,6 +403,7 @@ func (r *Runner) uploadScenesToCloud(ctx context.Context, job *Job, file *File, 
 
 	payload := cloud.SceneIngestPayload{
 		VideoID:         sceneOutput.VideoID,
+		VideoTitle:      strings.TrimSuffix(file.Filename, filepath.Ext(file.Filename)),
 		LibraryID:       r.libraryID,
 		PipelineVersion: sceneOutput.PipelineVersion,
 		ModelVersion:    sceneOutput.ModelVersion,
@@ -464,6 +522,7 @@ func (r *Runner) uploadScenesToCloudRetry(ctx context.Context, job *Job, file *F
 
 	payload := cloud.SceneIngestPayload{
 		VideoID:         sceneOutput.VideoID,
+		VideoTitle:      strings.TrimSuffix(file.Filename, filepath.Ext(file.Filename)),
 		LibraryID:       r.libraryID,
 		PipelineVersion: sceneOutput.PipelineVersion,
 		ModelVersion:    sceneOutput.ModelVersion,

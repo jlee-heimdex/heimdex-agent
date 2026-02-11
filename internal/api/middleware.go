@@ -18,7 +18,7 @@ type contextKey string
 
 const RequestIDKey contextKey = "request_id"
 
-var heimdexSubdomainRe = regexp.MustCompile(`^https?://[a-z0-9]([a-z0-9-]*[a-z0-9])?\.app\.heimdex\.(co|local)$`)
+var heimdexSubdomainRe = regexp.MustCompile(`^https?://[a-z0-9]([a-z0-9-]*[a-z0-9])?\.app\.heimdex\.(co|local)(:[0-9]+)?$`)
 
 var localhostWithPortRe = regexp.MustCompile(`^http://(localhost|127\.0\.0\.1)(:[0-9]+)?$`)
 

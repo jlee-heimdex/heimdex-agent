@@ -23,6 +23,9 @@ func TestIsAllowedOrigin(t *testing.T) {
 		"https://demo-org.app.heimdex.co",
 		"https://acme.app.heimdex.local",
 		"http://acme.app.heimdex.local",
+		"http://devorg.app.heimdex.local:3000",
+		"https://acme.app.heimdex.co:443",
+		"http://acme.app.heimdex.local:8080",
 		"https://a--b.app.heimdex.co",
 		"https://a.app.heimdex.co",
 	}
@@ -47,6 +50,8 @@ func TestIsAllowedOrigin(t *testing.T) {
 		"http://localhost:3000/path",
 		"https://-bad.app.heimdex.co",
 		"https://bad-.app.heimdex.co",
+		"https://acme.app.heimdex.co:not-a-port",
+		"https://acme.app.heimdex.co:3000/path",
 	}
 
 	for _, origin := range denied {

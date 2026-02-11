@@ -4,6 +4,7 @@ package cloud
 // Matches the SaaS IngestScenesRequest Pydantic schema.
 type SceneIngestPayload struct {
 	VideoID         string           `json:"video_id"`
+	VideoTitle      string           `json:"video_title,omitempty"`
 	LibraryID       string           `json:"library_id"`
 	PipelineVersion string           `json:"pipeline_version,omitempty"`
 	ModelVersion    string           `json:"model_version,omitempty"`

@@ -822,6 +822,9 @@ func TestUploadScenesToCloud_PropagatesFieldsToPayload(t *testing.T) {
 	if captured.VideoID != "video-1" {
 		t.Errorf("payload.VideoID = %q, want %q", captured.VideoID, "video-1")
 	}
+	if captured.VideoTitle != "clip" {
+		t.Errorf("payload.VideoTitle = %q, want %q", captured.VideoTitle, "clip")
+	}
 	if captured.TotalDurationMs != 60000 {
 		t.Errorf("payload.TotalDurationMs = %d, want 60000", captured.TotalDurationMs)
 	}
@@ -901,6 +904,9 @@ func TestUploadScenesToCloud_OlderPipelineOutput_StillWorks(t *testing.T) {
 
 	if captured.VideoID != "old-video" {
 		t.Fatalf("upload not called or wrong video_id: %q", captured.VideoID)
+	}
+	if captured.VideoTitle != "clip" {
+		t.Errorf("payload.VideoTitle = %q, want %q", captured.VideoTitle, "clip")
 	}
 
 	s := captured.Scenes[0]
@@ -1078,5 +1084,122 @@ func TestSceneIngestDoc_JSONMarshal_IncludesTags(t *testing.T) {
 	}
 	if _, ok := parsed["product_entities"]; !ok {
 		t.Error("ProductEntities should be present in JSON when non-nil")
+	}
+}
+
+func TestBackfillCloudUploads_CreatesJobsForIndexedFiles(t *testing.T) {
+	fake := &fakePipeRunner{}
+	caps := &pipelines.Capabilities{HasSpeech: true, HasScenes: true, ProbedAt: time.Now()}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+
+	tmpDir := t.TempDir()
+	fake.artifacts = tmpDir
+
+	cc := &fakeCloudClient{scenes: &fakeSceneUploader{}}
+	runner.SetCloudClient(cc, "lib-1")
+
+	_, file1 := createTestJobAndFile(t, repo)
+
+	ctx := context.Background()
+
+	file2 := &File{
+		ID:          NewID(),
+		SourceID:    file1.SourceID,
+		Path:        "/test/videos/clip2.mp4",
+		Filename:    "clip2.mp4",
+		Size:        2048,
+		Mtime:       time.Now(),
+		Fingerprint: "def456",
+		CreatedAt:   time.Now(),
+	}
+	if err := repo.CreateFile(ctx, file2); err != nil {
+		t.Fatalf("create file2: %v", err)
+	}
+
+	repo.CreateJob(ctx, &Job{ID: NewID(), Type: JobTypeIndex, Status: JobStatusCompleted, FileID: file1.ID, CreatedAt: time.Now(), UpdatedAt: time.Now()})
+	repo.CreateJob(ctx, &Job{ID: NewID(), Type: JobTypeIndex, Status: JobStatusCompleted, FileID: file2.ID, CreatedAt: time.Now(), UpdatedAt: time.Now()})
+
+	writeSceneResult(t, tmpDir, file1.ID)
+	writeSceneResult(t, tmpDir, file2.ID)
+
+	runner.backfillCloudUploads(ctx)
+
+	jobs, _ := repo.ListJobs(ctx, 100)
+	uploadCount := 0
+	for _, j := range jobs {
+		if j.Type == JobTypeUploadScenes {
+			uploadCount++
+		}
+	}
+	if uploadCount != 2 {
+		t.Errorf("expected 2 upload_scenes jobs, got %d", uploadCount)
+	}
+}
+
+func TestBackfillCloudUploads_SkipsAlreadyUploaded(t *testing.T) {
+	fake := &fakePipeRunner{}
+	caps := &pipelines.Capabilities{HasSpeech: true, HasScenes: true, ProbedAt: time.Now()}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+
+	tmpDir := t.TempDir()
+	fake.artifacts = tmpDir
+
+	cc := &fakeCloudClient{scenes: &fakeSceneUploader{}}
+	runner.SetCloudClient(cc, "lib-1")
+
+	_, file := createTestJobAndFile(t, repo)
+
+	ctx := context.Background()
+
+	repo.CreateJob(ctx, &Job{ID: NewID(), Type: JobTypeIndex, Status: JobStatusCompleted, FileID: file.ID, CreatedAt: time.Now(), UpdatedAt: time.Now()})
+	repo.CreateJob(ctx, &Job{ID: NewID(), Type: JobTypeUploadScenes, Status: JobStatusCompleted, FileID: file.ID, CreatedAt: time.Now(), UpdatedAt: time.Now()})
+
+	writeSceneResult(t, tmpDir, file.ID)
+
+	runner.backfillCloudUploads(ctx)
+
+	jobs, _ := repo.ListJobs(ctx, 100)
+	uploadCount := 0
+	for _, j := range jobs {
+		if j.Type == JobTypeUploadScenes {
+			uploadCount++
+		}
+	}
+	if uploadCount != 1 {
+		t.Errorf("expected 1 upload_scenes job (pre-existing), got %d", uploadCount)
+	}
+}
+
+func TestBackfillCloudUploads_SkipsMissingArtifacts(t *testing.T) {
+	fake := &fakePipeRunner{}
+	caps := &pipelines.Capabilities{HasSpeech: true, HasScenes: true, ProbedAt: time.Now()}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+
+	tmpDir := t.TempDir()
+	fake.artifacts = tmpDir
+
+	cc := &fakeCloudClient{scenes: &fakeSceneUploader{}}
+	runner.SetCloudClient(cc, "lib-1")
+
+	_, file := createTestJobAndFile(t, repo)
+
+	ctx := context.Background()
+
+	repo.CreateJob(ctx, &Job{ID: NewID(), Type: JobTypeIndex, Status: JobStatusCompleted, FileID: file.ID, CreatedAt: time.Now(), UpdatedAt: time.Now()})
+
+	runner.backfillCloudUploads(ctx)
+
+	jobs, _ := repo.ListJobs(ctx, 100)
+	uploadCount := 0
+	for _, j := range jobs {
+		if j.Type == JobTypeUploadScenes {
+			uploadCount++
+		}
+	}
+	if uploadCount != 0 {
+		t.Errorf("expected 0 upload_scenes jobs (no artifacts), got %d", uploadCount)
 	}
 }
