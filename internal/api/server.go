@@ -19,6 +19,7 @@ type Server struct {
 
 type ServerConfig struct {
 	Port           int
+	ArtifactsDir   string
 	CatalogService catalog.CatalogService
 	PlaybackServer playback.PlaybackService
 	Repository     catalog.Repository

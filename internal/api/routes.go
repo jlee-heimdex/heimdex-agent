@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -28,6 +30,9 @@ func NewRouter(cfg ServerConfig) *chi.Mux {
 		r.Get("/playback/file", playbackHandler(cfg))
 		r.Head("/playback/file", playbackHandler(cfg))
 		r.Options("/playback/file", noContent)
+		r.Get("/playback/thumbnail", thumbnailHandler(cfg))
+		r.Head("/playback/thumbnail", thumbnailHandler(cfg))
+		r.Options("/playback/thumbnail", noContent)
 	})
 
 	r.Group(func(r chi.Router) {
@@ -304,5 +309,50 @@ func playbackHandler(cfg ServerConfig) http.HandlerFunc {
 		if err := cfg.PlaybackServer.ServeFile(w, r, file.Path); err != nil {
 			cfg.Logger.Error("playback error", "error", err, "file_id", fileID)
 		}
+	}
+}
+
+func thumbnailHandler(cfg ServerConfig) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		fileID := r.URL.Query().Get("file_id")
+		if fileID == "" {
+			WriteError(w, http.StatusBadRequest, "file_id is required", "BAD_REQUEST")
+			return
+		}
+
+		file, err := cfg.CatalogService.GetFile(r.Context(), fileID)
+		if err != nil {
+			WriteError(w, http.StatusInternalServerError, err.Error(), "INTERNAL_ERROR")
+			return
+		}
+		if file == nil {
+			WriteError(w, http.StatusNotFound, "file not found", "NOT_FOUND")
+			return
+		}
+
+		source, _ := cfg.CatalogService.GetSource(r.Context(), file.SourceID)
+		if source != nil && !source.Present {
+			WriteError(w, http.StatusNotFound,
+				"file not available - drive '"+source.DriveNickname+"' is disconnected",
+				"DRIVE_DISCONNECTED")
+			return
+		}
+
+		sceneID := r.URL.Query().Get("scene_id")
+		var thumbPath string
+		if sceneID != "" {
+			thumbPath = filepath.Join(cfg.ArtifactsDir, fileID, "thumbnails", sceneID+".jpg")
+		} else {
+			thumbPath = filepath.Join(cfg.ArtifactsDir, fileID, "thumbnails", file.ID+"_scene_000.jpg")
+		}
+
+		if _, err := os.Stat(thumbPath); os.IsNotExist(err) {
+			WriteError(w, http.StatusNotFound, "thumbnail not available", "NOT_FOUND")
+			return
+		}
+
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		http.ServeFile(w, r, thumbPath)
 	}
 }

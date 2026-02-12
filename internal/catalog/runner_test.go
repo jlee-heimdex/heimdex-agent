@@ -14,6 +14,7 @@ import (
 
 	"github.com/heimdex/heimdex-agent/internal/cloud"
 	"github.com/heimdex/heimdex-agent/internal/db"
+	"github.com/heimdex/heimdex-agent/internal/pipeline"
 	"github.com/heimdex/heimdex-agent/internal/pipelines"
 )
 
@@ -34,7 +35,7 @@ func setupRunnerTest(t *testing.T, fake *fakePipeRunner, caps *pipelines.Capabil
 
 	doctor := pipelines.NewCachedDoctor(&fakeDoctorRunner{caps: caps}, logger)
 
-	runner := NewRunner(svc, repo, fake, doctor, logger)
+	runner := NewRunner(svc, repo, fake, pipeline.NewStubFFmpeg(logger), doctor, logger)
 	return runner, repo
 }
 
@@ -335,7 +336,7 @@ func TestProcessIndexJob_NoPipelineRunner(t *testing.T) {
 	svc := NewService(repo, nil)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	runner := NewRunner(svc, repo, nil, nil, logger)
+	runner := NewRunner(svc, repo, nil, nil, nil, logger)
 
 	job, _ := createTestJobAndFile(t, repo)
 	runner.processIndexJob(context.Background(), job)
@@ -461,7 +462,18 @@ type fakeCloudClient struct {
 func (f *fakeCloudClient) Auth() cloud.AuthService              { return nil }
 func (f *fakeCloudClient) Upload() cloud.UploadService          { return nil }
 func (f *fakeCloudClient) Scenes() cloud.SceneUploader          { return f.scenes }
+func (f *fakeCloudClient) Libraries() cloud.LibraryService      { return &fakeLibraryService{} }
 func (f *fakeCloudClient) RegisterDevice(deviceID string) error { return nil }
+
+type fakeLibraryService struct{}
+
+func (f *fakeLibraryService) GetOrCreate(ctx context.Context, name string) (*cloud.LibraryResult, error) {
+	return &cloud.LibraryResult{ID: "auto-lib-" + name, Name: name, Created: true}, nil
+}
+
+func (f *fakeLibraryService) List(ctx context.Context) ([]cloud.LibraryResult, error) {
+	return nil, nil
+}
 
 func writeSceneResult(t *testing.T, artifactsDir, fileID string) {
 	t.Helper()
@@ -685,13 +697,16 @@ func TestBuildSceneIngestDocs_PropagatesAllFields(t *testing.T) {
 		},
 	}
 
-	docs := buildSceneIngestDocs(input)
+	docs := buildSceneIngestDocs(input, "local")
 
 	if len(docs) != 2 {
 		t.Fatalf("got %d docs, want 2", len(docs))
 	}
 
 	d := docs[0]
+	if d.SourceType != "local" {
+		t.Errorf("SourceType = %q, want %q", d.SourceType, "local")
+	}
 	if d.SceneID != "vid_scene_0" {
 		t.Errorf("SceneID = %q, want %q", d.SceneID, "vid_scene_0")
 	}
@@ -742,11 +757,11 @@ func TestBuildSceneIngestDocs_PropagatesAllFields(t *testing.T) {
 }
 
 func TestBuildSceneIngestDocs_EmptyInput(t *testing.T) {
-	docs := buildSceneIngestDocs(nil)
+	docs := buildSceneIngestDocs(nil, "local")
 	if len(docs) != 0 {
 		t.Errorf("got %d docs for nil input, want 0", len(docs))
 	}
-	docs = buildSceneIngestDocs([]pipelines.SceneBoundary{})
+	docs = buildSceneIngestDocs([]pipelines.SceneBoundary{}, "gdrive")
 	if len(docs) != 0 {
 		t.Errorf("got %d docs for empty input, want 0", len(docs))
 	}
@@ -756,11 +771,14 @@ func TestBuildSceneIngestDocs_BackwardCompat_MissingFields(t *testing.T) {
 	input := []pipelines.SceneBoundary{
 		{SceneID: "vid_scene_0", StartMs: 0, EndMs: 5000},
 	}
-	docs := buildSceneIngestDocs(input)
+	docs := buildSceneIngestDocs(input, "removable_disk")
 	if len(docs) != 1 {
 		t.Fatalf("got %d docs, want 1", len(docs))
 	}
 	d := docs[0]
+	if d.SourceType != "removable_disk" {
+		t.Errorf("SourceType = %q, want %q", d.SourceType, "removable_disk")
+	}
 	if d.TranscriptRaw != "" {
 		t.Errorf("TranscriptRaw = %q, want empty string", d.TranscriptRaw)
 	}
@@ -833,6 +851,9 @@ func TestUploadScenesToCloud_PropagatesFieldsToPayload(t *testing.T) {
 	}
 
 	s := captured.Scenes[0]
+	if s.SourceType != "local" {
+		t.Errorf("SourceType = %q, want %q (folder source resolves to local)", s.SourceType, "local")
+	}
 	if s.TranscriptRaw != "지금 이 수분크림을 소개합니다" {
 		t.Errorf("TranscriptRaw = %q, want Korean transcript", s.TranscriptRaw)
 	}
@@ -910,6 +931,9 @@ func TestUploadScenesToCloud_OlderPipelineOutput_StillWorks(t *testing.T) {
 	}
 
 	s := captured.Scenes[0]
+	if s.SourceType != "local" {
+		t.Errorf("SourceType = %q, want %q (folder source resolves to local)", s.SourceType, "local")
+	}
 	if s.TranscriptRaw != "" {
 		t.Errorf("TranscriptRaw = %q, want empty for old pipeline output", s.TranscriptRaw)
 	}
@@ -1084,6 +1108,28 @@ func TestSceneIngestDoc_JSONMarshal_IncludesTags(t *testing.T) {
 	}
 	if _, ok := parsed["product_entities"]; !ok {
 		t.Error("ProductEntities should be present in JSON when non-nil")
+	}
+}
+
+func TestResolveSourceType(t *testing.T) {
+	cases := []struct {
+		name   string
+		source *Source
+		want   string
+	}{
+		{"nil source defaults to local", nil, "local"},
+		{"folder maps to local", &Source{Type: "folder"}, "local"},
+		{"gdrive stays gdrive", &Source{Type: "gdrive"}, "gdrive"},
+		{"removable_disk stays removable_disk", &Source{Type: "removable_disk"}, "removable_disk"},
+		{"unknown type defaults to local", &Source{Type: "something_else"}, "local"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveSourceType(tc.source)
+			if got != tc.want {
+				t.Errorf("resolveSourceType(%v) = %q, want %q", tc.source, got, tc.want)
+			}
+		})
 	}
 }
 

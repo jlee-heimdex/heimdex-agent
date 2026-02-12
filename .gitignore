@@ -1,5 +1,6 @@
 # Binaries
 agent
+heimdex-agent
 bin/
 *.exe
 *.exe~

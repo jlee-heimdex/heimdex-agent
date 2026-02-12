@@ -199,11 +199,14 @@ func (r *SubprocessRunner) RunScenes(ctx context.Context, videoPath, videoID, sp
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.ScenesTimeout)
 	defer cancel()
 
+	keyframeDir := filepath.Join(filepath.Dir(outPath), "..", "thumbnails")
+
 	result := r.exec(ctx, outPath,
 		"scenes", "pipeline",
 		"--video", videoPath,
 		"--video-id", videoID,
 		"--speech-result", speechResultPath,
+		"--keyframe-dir", keyframeDir,
 		"--out", outPath,
 	)
 	return result, nil

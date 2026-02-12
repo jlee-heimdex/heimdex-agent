@@ -13,9 +13,11 @@ type Repository interface {
 	ListSources(ctx context.Context) ([]*Source, error)
 	DeleteSource(ctx context.Context, id string) error
 	UpdateSourcePresent(ctx context.Context, id string, present bool) error
+	UpdateSourceCloudLibraryID(ctx context.Context, id, cloudLibraryID string) error
 
 	CreateFile(ctx context.Context, file *File) error
 	GetFile(ctx context.Context, id string) (*File, error)
+	ListFiles(ctx context.Context) ([]*File, error)
 	GetFilesBySource(ctx context.Context, sourceID string) ([]*File, error)
 	DeleteFilesBySource(ctx context.Context, sourceID string) error
 	UpsertFile(ctx context.Context, file *File) error
@@ -42,15 +44,15 @@ func NewRepository(db *sql.DB) *SQLiteRepository {
 
 func (r *SQLiteRepository) CreateSource(ctx context.Context, s *Source) error {
 	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO sources (id, type, path, display_name, drive_nickname, present, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, s.ID, s.Type, s.Path, s.DisplayName, s.DriveNickname, boolToInt(s.Present), s.CreatedAt.Format(time.RFC3339))
+		INSERT INTO sources (id, type, path, display_name, drive_nickname, cloud_library_id, present, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, s.ID, s.Type, s.Path, s.DisplayName, nullString(s.DriveNickname), nullString(s.CloudLibraryID), boolToInt(s.Present), s.CreatedAt.Format(time.RFC3339))
 	return err
 }
 
 func (r *SQLiteRepository) GetSource(ctx context.Context, id string) (*Source, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, type, path, display_name, drive_nickname, present, created_at
+		SELECT id, type, path, display_name, drive_nickname, cloud_library_id, present, created_at
 		FROM sources WHERE id = ?
 	`, id)
 	return r.scanSource(row)
@@ -58,7 +60,7 @@ func (r *SQLiteRepository) GetSource(ctx context.Context, id string) (*Source, e
 
 func (r *SQLiteRepository) GetSourceByPath(ctx context.Context, path string) (*Source, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, type, path, display_name, drive_nickname, present, created_at
+		SELECT id, type, path, display_name, drive_nickname, cloud_library_id, present, created_at
 		FROM sources WHERE path = ?
 	`, path)
 	return r.scanSource(row)
@@ -69,8 +71,9 @@ func (r *SQLiteRepository) scanSource(row *sql.Row) (*Source, error) {
 	var present int
 	var createdAt string
 	var driveNickname sql.NullString
+	var cloudLibraryID sql.NullString
 
-	err := row.Scan(&s.ID, &s.Type, &s.Path, &s.DisplayName, &driveNickname, &present, &createdAt)
+	err := row.Scan(&s.ID, &s.Type, &s.Path, &s.DisplayName, &driveNickname, &cloudLibraryID, &present, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -80,13 +83,14 @@ func (r *SQLiteRepository) scanSource(row *sql.Row) (*Source, error) {
 
 	s.Present = present == 1
 	s.DriveNickname = driveNickname.String
+	s.CloudLibraryID = cloudLibraryID.String
 	s.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	return &s, nil
 }
 
 func (r *SQLiteRepository) ListSources(ctx context.Context) ([]*Source, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, type, path, display_name, drive_nickname, present, created_at
+		SELECT id, type, path, display_name, drive_nickname, cloud_library_id, present, created_at
 		FROM sources ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -100,12 +104,14 @@ func (r *SQLiteRepository) ListSources(ctx context.Context) ([]*Source, error) {
 		var present int
 		var createdAt string
 		var driveNickname sql.NullString
+		var cloudLibraryID sql.NullString
 
-		if err := rows.Scan(&s.ID, &s.Type, &s.Path, &s.DisplayName, &driveNickname, &present, &createdAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.Type, &s.Path, &s.DisplayName, &driveNickname, &cloudLibraryID, &present, &createdAt); err != nil {
 			return nil, err
 		}
 		s.Present = present == 1
 		s.DriveNickname = driveNickname.String
+		s.CloudLibraryID = cloudLibraryID.String
 		s.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 		sources = append(sources, &s)
 	}
@@ -119,6 +125,11 @@ func (r *SQLiteRepository) DeleteSource(ctx context.Context, id string) error {
 
 func (r *SQLiteRepository) UpdateSourcePresent(ctx context.Context, id string, present bool) error {
 	_, err := r.db.ExecContext(ctx, "UPDATE sources SET present = ? WHERE id = ?", boolToInt(present), id)
+	return err
+}
+
+func (r *SQLiteRepository) UpdateSourceCloudLibraryID(ctx context.Context, id, cloudLibraryID string) error {
+	_, err := r.db.ExecContext(ctx, "UPDATE sources SET cloud_library_id = ? WHERE id = ?", cloudLibraryID, id)
 	return err
 }
 
@@ -148,6 +159,30 @@ func (r *SQLiteRepository) GetFile(ctx context.Context, id string) (*File, error
 	f.Mtime, _ = time.Parse(time.RFC3339, mtime)
 	f.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	return &f, nil
+}
+
+func (r *SQLiteRepository) ListFiles(ctx context.Context) ([]*File, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, source_id, path, filename, size, mtime, fingerprint, created_at
+		FROM files ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []*File
+	for rows.Next() {
+		var f File
+		var mtime, createdAt string
+		if err := rows.Scan(&f.ID, &f.SourceID, &f.Path, &f.Filename, &f.Size, &mtime, &f.Fingerprint, &createdAt); err != nil {
+			return nil, err
+		}
+		f.Mtime, _ = time.Parse(time.RFC3339, mtime)
+		f.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		files = append(files, &f)
+	}
+	return files, rows.Err()
 }
 
 func (r *SQLiteRepository) GetFilesBySource(ctx context.Context, sourceID string) ([]*File, error) {

@@ -14,27 +14,30 @@ import (
 	"time"
 
 	"github.com/heimdex/heimdex-agent/internal/cloud"
+	"github.com/heimdex/heimdex-agent/internal/pipeline"
 	"github.com/heimdex/heimdex-agent/internal/pipelines"
 )
 
 type Runner struct {
-	service      *Service
-	repo         Repository
-	pipeRunner   pipelines.Runner
-	doctor       *pipelines.CachedDoctor
-	cloudClient  cloud.Client
-	libraryID    string
-	logger       *slog.Logger
-	pollInterval time.Duration
-	running      atomic.Bool
-	paused       atomic.Bool
+	service           *Service
+	repo              Repository
+	pipeRunner        pipelines.Runner
+	ffmpeg            pipeline.FFmpeg
+	doctor            *pipelines.CachedDoctor
+	cloudClient       cloud.Client
+	fallbackLibraryID string
+	logger            *slog.Logger
+	pollInterval      time.Duration
+	running           atomic.Bool
+	paused            atomic.Bool
 }
 
-func NewRunner(service *Service, repo Repository, pipeRunner pipelines.Runner, doctor *pipelines.CachedDoctor, logger *slog.Logger) *Runner {
+func NewRunner(service *Service, repo Repository, pipeRunner pipelines.Runner, ffmpeg pipeline.FFmpeg, doctor *pipelines.CachedDoctor, logger *slog.Logger) *Runner {
 	return &Runner{
 		service:      service,
 		repo:         repo,
 		pipeRunner:   pipeRunner,
+		ffmpeg:       ffmpeg,
 		doctor:       doctor,
 		logger:       logger,
 		pollInterval: 5 * time.Second,
@@ -45,7 +48,42 @@ func NewRunner(service *Service, repo Repository, pipeRunner pipelines.Runner, d
 // If not set (nil), scene upload is skipped silently.
 func (r *Runner) SetCloudClient(client cloud.Client, libraryID string) {
 	r.cloudClient = client
-	r.libraryID = libraryID
+	r.fallbackLibraryID = libraryID
+}
+
+func (r *Runner) resolveLibraryID(ctx context.Context, source *Source) (string, error) {
+	if source != nil && source.CloudLibraryID != "" {
+		return source.CloudLibraryID, nil
+	}
+
+	if r.cloudClient != nil && source != nil {
+		result, err := r.cloudClient.Libraries().GetOrCreate(ctx, source.DisplayName)
+		if err != nil {
+			r.logger.Warn("library auto-create failed, using fallback",
+				"source_id", source.ID,
+				"source_name", source.DisplayName,
+				"error", err,
+			)
+		} else {
+			if updateErr := r.repo.UpdateSourceCloudLibraryID(ctx, source.ID, result.ID); updateErr != nil {
+				r.logger.Warn("failed to store library mapping", "source_id", source.ID, "error", updateErr)
+			} else {
+				r.logger.Info("library resolved for source",
+					"source_id", source.ID,
+					"source_name", source.DisplayName,
+					"library_id", result.ID,
+					"created", result.Created,
+				)
+			}
+			return result.ID, nil
+		}
+	}
+
+	if r.fallbackLibraryID != "" {
+		return r.fallbackLibraryID, nil
+	}
+
+	return "", fmt.Errorf("no library ID available: source has no mapping and no fallback configured")
 }
 
 func (r *Runner) backfillCloudUploads(ctx context.Context) {
@@ -109,6 +147,9 @@ func (r *Runner) Start(ctx context.Context) {
 	// before cloud was enabled.  This is a one-shot best-effort pass.
 	if r.cloudClient != nil && r.pipeRunner != nil {
 		r.backfillCloudUploads(ctx)
+	}
+	if r.pipeRunner != nil && r.ffmpeg != nil {
+		r.backfillThumbnails(ctx)
 	}
 
 	ticker := time.NewTicker(r.pollInterval)
@@ -178,9 +219,60 @@ func (r *Runner) processNextJob(ctx context.Context) {
 	case JobTypeUploadScenes:
 		r.processUploadScenesJob(ctx, job)
 
+	case JobTypeGenerateThumbnails:
+		r.processGenerateThumbnailsJob(ctx, job)
+
 	default:
 		r.logger.Warn("unknown job type", "type", job.Type)
 		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, "unknown job type")
+	}
+}
+
+func (r *Runner) backfillThumbnails(ctx context.Context) {
+	files, err := r.repo.ListFiles(ctx)
+	if err != nil {
+		r.logger.Warn("thumbnail backfill: cannot list files", "error", err)
+		return
+	}
+
+	jobs, err := r.repo.ListJobs(ctx, 1000)
+	if err != nil {
+		return
+	}
+
+	hasThumbJob := make(map[string]bool)
+	for _, j := range jobs {
+		if j.Type == JobTypeGenerateThumbnails {
+			hasThumbJob[j.FileID] = true
+		}
+	}
+
+	for _, file := range files {
+		if hasThumbJob[file.ID] {
+			continue
+		}
+		scenePath := filepath.Join(r.pipeRunner.ArtifactsDir(), file.ID, "scenes", "result.json")
+		if _, err := os.Stat(scenePath); os.IsNotExist(err) {
+			continue
+		}
+		thumbDir := filepath.Join(r.pipeRunner.ArtifactsDir(), file.ID, "thumbnails")
+		if info, err := os.Stat(thumbDir); err == nil && info.IsDir() {
+			entries, _ := os.ReadDir(thumbDir)
+			if len(entries) > 0 {
+				continue
+			}
+		}
+		job := &Job{
+			ID:        NewID(),
+			Type:      JobTypeGenerateThumbnails,
+			Status:    JobStatusPending,
+			FileID:    file.ID,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		if err := r.repo.CreateJob(ctx, job); err != nil {
+			r.logger.Warn("thumbnail backfill: create job failed", "file_id", file.ID, "error", err)
+		}
 	}
 }
 
@@ -359,7 +451,7 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 // ingest payload. This is the single mapping point — every field the SaaS
 // accepts should be forwarded here.  Missing fields in older pipeline outputs
 // default safely (empty string / empty slice / zero).
-func buildSceneIngestDocs(scenes []pipelines.SceneBoundary) []cloud.SceneIngestDoc {
+func buildSceneIngestDocs(scenes []pipelines.SceneBoundary, sourceType string) []cloud.SceneIngestDoc {
 	docs := make([]cloud.SceneIngestDoc, 0, len(scenes))
 	for _, s := range scenes {
 		docs = append(docs, cloud.SceneIngestDoc{
@@ -374,9 +466,27 @@ func buildSceneIngestDocs(scenes []pipelines.SceneBoundary) []cloud.SceneIngestD
 			KeywordTags:         s.KeywordTags,
 			ProductTags:         s.ProductTags,
 			ProductEntities:     s.ProductEntities,
+			SourceType:          sourceType,
 		})
 	}
 	return docs
+}
+
+// resolveSourceType maps the agent's internal Source.Type to the cloud API
+// source_type value. Unknown source types default to "local".
+func resolveSourceType(source *Source) string {
+	if source == nil {
+		return "local"
+	}
+	switch source.Type {
+	case "gdrive":
+		return "gdrive"
+	case "removable_disk":
+		return "removable_disk"
+	default:
+		// "folder" and any future local source types map to "local"
+		return "local"
+	}
 }
 
 func (r *Runner) uploadScenesToCloud(ctx context.Context, job *Job, file *File, artifactsBase string) {
@@ -399,12 +509,19 @@ func (r *Runner) uploadScenesToCloud(ctx context.Context, job *Job, file *File, 
 		return
 	}
 
-	scenes := buildSceneIngestDocs(sceneOutput.Scenes)
+	source, _ := r.repo.GetSource(ctx, file.SourceID)
+	libraryID, err := r.resolveLibraryID(ctx, source)
+	if err != nil {
+		r.logger.Warn("scene upload skipped: no library available", "job_id", job.ID, "error", err)
+		return
+	}
+	sourceType := resolveSourceType(source)
+	scenes := buildSceneIngestDocs(sceneOutput.Scenes, sourceType)
 
 	payload := cloud.SceneIngestPayload{
 		VideoID:         sceneOutput.VideoID,
 		VideoTitle:      strings.TrimSuffix(file.Filename, filepath.Ext(file.Filename)),
-		LibraryID:       r.libraryID,
+		LibraryID:       libraryID,
 		PipelineVersion: sceneOutput.PipelineVersion,
 		ModelVersion:    sceneOutput.ModelVersion,
 		TotalDurationMs: sceneOutput.TotalDurationMs,
@@ -417,7 +534,6 @@ func (r *Runner) uploadScenesToCloud(ctx context.Context, job *Job, file *File, 
 	if err := r.cloudClient.Scenes().UploadScenes(uploadCtx, payload); err != nil {
 		r.logger.Warn("scene upload failed (non-blocking)", "job_id", job.ID, "video_id", sceneOutput.VideoID, "error", err)
 
-		// Only create retry job for retryable errors; permanent 4xx should not retry.
 		var uploadErr *cloud.UploadError
 		if errors.As(err, &uploadErr) && !uploadErr.IsRetryable() {
 			r.logger.Warn("scene upload permanent failure, no retry",
@@ -444,6 +560,21 @@ func (r *Runner) uploadScenesToCloud(ctx context.Context, job *Job, file *File, 
 	}
 
 	r.logger.Info("scene upload succeeded", "job_id", job.ID, "video_id", sceneOutput.VideoID, "scene_count", len(scenes))
+
+	// Record a completed upload_scenes job so backfillCloudUploads won't
+	// create a duplicate upload for this file on next restart.
+	now := time.Now()
+	uploadJob := &Job{
+		ID:        NewID(),
+		Type:      JobTypeUploadScenes,
+		Status:    JobStatusCompleted,
+		FileID:    file.ID,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if createErr := r.repo.CreateJob(ctx, uploadJob); createErr != nil {
+		r.logger.Warn("failed to record upload job (non-critical)", "file_id", file.ID, "error", createErr)
+	}
 }
 
 func uploadBackoff(attempt int) time.Duration {
@@ -498,6 +629,55 @@ func (r *Runner) processUploadScenesJob(ctx context.Context, job *Job) {
 	r.uploadScenesToCloudRetry(ctx, job, file, artifactsBase, attempt)
 }
 
+func (r *Runner) processGenerateThumbnailsJob(ctx context.Context, job *Job) {
+	if r.pipeRunner == nil || r.ffmpeg == nil {
+		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, "thumbnail generation not configured")
+		return
+	}
+
+	r.repo.UpdateJobStatus(ctx, job.ID, JobStatusRunning, "")
+
+	file, err := r.repo.GetFile(ctx, job.FileID)
+	if err != nil || file == nil {
+		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, "file not found")
+		return
+	}
+
+	scenePath := filepath.Join(r.pipeRunner.ArtifactsDir(), file.ID, "scenes", "result.json")
+	data, err := os.ReadFile(scenePath)
+	if err != nil {
+		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, "cannot read scene result: "+err.Error())
+		return
+	}
+
+	var sceneOutput pipelines.SceneOutputPayload
+	if err := json.Unmarshal(data, &sceneOutput); err != nil {
+		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, "invalid scene JSON")
+		return
+	}
+
+	thumbDir := filepath.Join(r.pipeRunner.ArtifactsDir(), file.ID, "thumbnails")
+	os.MkdirAll(thumbDir, 0o755)
+
+	generated := 0
+	for _, scene := range sceneOutput.Scenes {
+		outPath := filepath.Join(thumbDir, scene.SceneID+".jpg")
+		if _, err := os.Stat(outPath); err == nil {
+			generated++
+			continue
+		}
+		ts := float64(scene.KeyframeTimestampMs) / 1000.0
+		if err := r.ffmpeg.GenerateThumbnail(file.Path, outPath, ts); err != nil {
+			r.logger.Warn("thumbnail generation failed", "scene_id", scene.SceneID, "error", err)
+			continue
+		}
+		generated++
+	}
+
+	r.logger.Info("thumbnails generated", "file_id", file.ID, "count", generated, "total", len(sceneOutput.Scenes))
+	r.repo.UpdateJobStatus(ctx, job.ID, JobStatusCompleted, "")
+}
+
 func (r *Runner) uploadScenesToCloudRetry(ctx context.Context, job *Job, file *File, artifactsBase string, attempt int) {
 	scenePath := filepath.Join(artifactsBase, "scenes", "result.json")
 
@@ -518,12 +698,19 @@ func (r *Runner) uploadScenesToCloudRetry(ctx context.Context, job *Job, file *F
 		return
 	}
 
-	scenes := buildSceneIngestDocs(sceneOutput.Scenes)
+	source, _ := r.repo.GetSource(ctx, file.SourceID)
+	libraryID, err := r.resolveLibraryID(ctx, source)
+	if err != nil {
+		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, fmt.Sprintf("no library available: %v", err))
+		return
+	}
+	sourceType := resolveSourceType(source)
+	scenes := buildSceneIngestDocs(sceneOutput.Scenes, sourceType)
 
 	payload := cloud.SceneIngestPayload{
 		VideoID:         sceneOutput.VideoID,
 		VideoTitle:      strings.TrimSuffix(file.Filename, filepath.Ext(file.Filename)),
-		LibraryID:       r.libraryID,
+		LibraryID:       libraryID,
 		PipelineVersion: sceneOutput.PipelineVersion,
 		ModelVersion:    sceneOutput.ModelVersion,
 		TotalDurationMs: sceneOutput.TotalDurationMs,

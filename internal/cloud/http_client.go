@@ -68,6 +68,10 @@ func (c *HTTPClient) Scenes() SceneUploader {
 	return c
 }
 
+func (c *HTTPClient) Libraries() LibraryService {
+	return &HTTPLibraryService{client: c}
+}
+
 func (c *HTTPClient) RegisterDevice(deviceID string) error {
 	c.logger.Info("cloud http: device registration requested", "device_id", deviceID)
 	return nil

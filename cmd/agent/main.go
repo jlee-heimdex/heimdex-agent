@@ -18,6 +18,7 @@ import (
 	"github.com/heimdex/heimdex-agent/internal/config"
 	"github.com/heimdex/heimdex-agent/internal/db"
 	"github.com/heimdex/heimdex-agent/internal/logging"
+	"github.com/heimdex/heimdex-agent/internal/pipeline"
 	"github.com/heimdex/heimdex-agent/internal/pipelines"
 	"github.com/heimdex/heimdex-agent/internal/playback"
 	"github.com/heimdex/heimdex-agent/internal/ui"
@@ -129,8 +130,9 @@ func run() error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	ffmpeg := pipeline.NewRealFFmpeg(logger)
 
-	runner := catalog.NewRunner(catalogSvc, repo, pipeRunner, doctor, logger)
+	runner := catalog.NewRunner(catalogSvc, repo, pipeRunner, ffmpeg, doctor, logger)
 	if cfg.CloudEnabled() {
 		runner.SetCloudClient(cloudClient, cfg.CloudLibraryID())
 	}
@@ -138,6 +140,7 @@ func run() error {
 
 	apiServer := api.NewServer(api.ServerConfig{
 		Port:           cfg.Port(),
+		ArtifactsDir:   pipeCfg.ArtifactsBase,
 		CatalogService: catalogSvc,
 		PlaybackServer: playbackSvc,
 		Repository:     repo,

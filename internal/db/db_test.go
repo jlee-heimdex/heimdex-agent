@@ -70,8 +70,8 @@ func TestNew_MigrationsIdempotent(t *testing.T) {
 		t.Fatalf("count migrations error = %v", err)
 	}
 
-	if count != 2 {
-		t.Errorf("migration count = %d, want 2", count)
+	if count != 3 {
+		t.Errorf("migration count = %d, want 3", count)
 	}
 }
 

@@ -238,12 +238,20 @@ func (f *fakeRepo) UpdateSourcePresent(ctx context.Context, id string, present b
 	return nil
 }
 
+func (f *fakeRepo) UpdateSourceCloudLibraryID(ctx context.Context, id, cloudLibraryID string) error {
+	return nil
+}
+
 func (f *fakeRepo) CreateFile(ctx context.Context, file *catalog.File) error {
 	return nil
 }
 
 func (f *fakeRepo) GetFile(ctx context.Context, id string) (*catalog.File, error) {
 	return nil, nil
+}
+
+func (f *fakeRepo) ListFiles(ctx context.Context) ([]*catalog.File, error) {
+	return []*catalog.File{}, nil
 }
 
 func (f *fakeRepo) GetFilesBySource(ctx context.Context, sourceID string) ([]*catalog.File, error) {

@@ -7,13 +7,14 @@ import (
 )
 
 type Source struct {
-	ID            string    `json:"id"`
-	Type          string    `json:"type"`
-	Path          string    `json:"path"`
-	DisplayName   string    `json:"display_name"`
-	DriveNickname string    `json:"drive_nickname,omitempty"`
-	Present       bool      `json:"present"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	Type           string    `json:"type"`
+	Path           string    `json:"path"`
+	DisplayName    string    `json:"display_name"`
+	DriveNickname  string    `json:"drive_nickname,omitempty"`
+	CloudLibraryID string    `json:"cloud_library_id,omitempty"`
+	Present        bool      `json:"present"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type File struct {
@@ -28,9 +29,10 @@ type File struct {
 }
 
 const (
-	JobTypeScan         = "scan"
-	JobTypeIndex        = "index"
-	JobTypeUploadScenes = "upload_scenes"
+	JobTypeScan               = "scan"
+	JobTypeIndex              = "index"
+	JobTypeUploadScenes       = "upload_scenes"
+	JobTypeGenerateThumbnails = "generate_thumbnails"
 
 	JobStatusPending   = "pending"
 	JobStatusRunning   = "running"

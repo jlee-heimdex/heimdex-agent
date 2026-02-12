@@ -9,6 +9,7 @@ type Client interface {
 	Auth() AuthService
 	Upload() UploadService
 	Scenes() SceneUploader
+	Libraries() LibraryService
 	RegisterDevice(deviceID string) error
 }
 
@@ -17,18 +18,20 @@ type SceneUploader interface {
 }
 
 type StubClient struct {
-	auth   *StubAuth
-	upload *StubUpload
-	scenes *StubSceneUploader
-	logger *slog.Logger
+	auth      *StubAuth
+	upload    *StubUpload
+	scenes    *StubSceneUploader
+	libraries *StubLibraryService
+	logger    *slog.Logger
 }
 
 func NewStubClient(logger *slog.Logger) *StubClient {
 	return &StubClient{
-		auth:   NewStubAuth(logger),
-		upload: NewStubUpload(logger),
-		scenes: &StubSceneUploader{logger: logger},
-		logger: logger,
+		auth:      NewStubAuth(logger),
+		upload:    NewStubUpload(logger),
+		scenes:    &StubSceneUploader{logger: logger},
+		libraries: &StubLibraryService{logger: logger},
+		logger:    logger,
 	}
 }
 
@@ -42,6 +45,10 @@ func (c *StubClient) Upload() UploadService {
 
 func (c *StubClient) Scenes() SceneUploader {
 	return c.scenes
+}
+
+func (c *StubClient) Libraries() LibraryService {
+	return c.libraries
 }
 
 func (c *StubClient) RegisterDevice(deviceID string) error {
