@@ -133,6 +133,7 @@ func run() error {
 	ffmpeg := pipeline.NewRealFFmpeg(logger)
 
 	runner := catalog.NewRunner(catalogSvc, repo, pipeRunner, ffmpeg, doctor, logger)
+	runner.SetOCRConfig(cfg)
 	if cfg.CloudEnabled() {
 		runner.SetCloudClient(cloudClient, cfg.CloudLibraryID())
 	}

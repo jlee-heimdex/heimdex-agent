@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -588,11 +590,161 @@ func TestParseDoctorJSON_ScenesWithoutSpeech(t *testing.T) {
 	}
 }
 
+func TestDeriveCapabilities_OCR_FromPipelines(t *testing.T) {
+	raw := []byte(`{
+		"pipelines": {
+			"ocr": true
+		}
+	}`)
+
+	var caps Capabilities
+	if err := json.Unmarshal(raw, &caps); err != nil {
+		t.Fatalf("unmarshal doctor JSON: %v", err)
+	}
+
+	DeriveCapabilities(&caps)
+
+	if !caps.HasOCR {
+		t.Error("HasOCR = false, want true from pipelines")
+	}
+}
+
+func TestDeriveCapabilities_OCR_PipelinesDisabled(t *testing.T) {
+	raw := []byte(`{
+		"pipelines": {
+			"speech": true,
+			"ocr": false
+		}
+	}`)
+
+	var caps Capabilities
+	if err := json.Unmarshal(raw, &caps); err != nil {
+		t.Fatalf("unmarshal doctor JSON: %v", err)
+	}
+
+	DeriveCapabilities(&caps)
+
+	if caps.HasOCR {
+		t.Error("HasOCR = true, want false from pipelines")
+	}
+}
+
+func TestDeriveCapabilities_OCR_LegacyFallback(t *testing.T) {
+	raw := []byte(`{
+		"dependencies": {
+			"paddleocr": {"available": true}
+		}
+	}`)
+
+	var caps Capabilities
+	if err := json.Unmarshal(raw, &caps); err != nil {
+		t.Fatalf("unmarshal doctor JSON: %v", err)
+	}
+
+	DeriveCapabilities(&caps)
+
+	if !caps.HasOCR {
+		t.Error("HasOCR = false, want true from legacy fallback")
+	}
+}
+
+func TestDeriveCapabilities_OCR_LegacyMissing(t *testing.T) {
+	raw := []byte(`{
+		"dependencies": {
+			"cv2": {"available": true}
+		}
+	}`)
+
+	var caps Capabilities
+	if err := json.Unmarshal(raw, &caps); err != nil {
+		t.Fatalf("unmarshal doctor JSON: %v", err)
+	}
+
+	DeriveCapabilities(&caps)
+
+	if caps.HasOCR {
+		t.Error("HasOCR = true, want false when paddleocr is missing")
+	}
+}
+
+func TestRunScenes_WithOCR(t *testing.T) {
+	runner := newSceneRunnerForArgsTest(t)
+	outPath := filepath.Join(t.TempDir(), "scenes.json")
+
+	result, err := runner.RunScenes(context.Background(), "video.mp4", "video-id", "speech.json", outPath, true, false)
+	if err != nil {
+		t.Fatalf("RunScenes error: %v", err)
+	}
+	if !result.IsSuccess() {
+		t.Fatalf("RunScenes exit code = %d, want 0", result.ExitCode)
+	}
+	if !strings.Contains(result.StderrTail, "--ocr") {
+		t.Errorf("stderr args = %q, want --ocr", result.StderrTail)
+	}
+	if strings.Contains(result.StderrTail, "--redact-pii") {
+		t.Errorf("stderr args = %q, did not expect --redact-pii", result.StderrTail)
+	}
+}
+
+func TestRunScenes_WithRedactPII(t *testing.T) {
+	runner := newSceneRunnerForArgsTest(t)
+	outPath := filepath.Join(t.TempDir(), "scenes.json")
+
+	result, err := runner.RunScenes(context.Background(), "video.mp4", "video-id", "speech.json", outPath, false, true)
+	if err != nil {
+		t.Fatalf("RunScenes error: %v", err)
+	}
+	if !result.IsSuccess() {
+		t.Fatalf("RunScenes exit code = %d, want 0", result.ExitCode)
+	}
+	if !strings.Contains(result.StderrTail, "--redact-pii") {
+		t.Errorf("stderr args = %q, want --redact-pii", result.StderrTail)
+	}
+	if strings.Contains(result.StderrTail, "--ocr") {
+		t.Errorf("stderr args = %q, did not expect --ocr", result.StderrTail)
+	}
+}
+
+func TestRunScenes_WithBothFlags(t *testing.T) {
+	runner := newSceneRunnerForArgsTest(t)
+	outPath := filepath.Join(t.TempDir(), "scenes.json")
+
+	result, err := runner.RunScenes(context.Background(), "video.mp4", "video-id", "speech.json", outPath, true, true)
+	if err != nil {
+		t.Fatalf("RunScenes error: %v", err)
+	}
+	if !result.IsSuccess() {
+		t.Fatalf("RunScenes exit code = %d, want 0", result.ExitCode)
+	}
+	if !strings.Contains(result.StderrTail, "--ocr") {
+		t.Errorf("stderr args = %q, want --ocr", result.StderrTail)
+	}
+	if !strings.Contains(result.StderrTail, "--redact-pii") {
+		t.Errorf("stderr args = %q, want --redact-pii", result.StderrTail)
+	}
+}
+
+func newSceneRunnerForArgsTest(t *testing.T) *SubprocessRunner {
+	t.Helper()
+
+	scriptPath := filepath.Join(t.TempDir(), "argdump.sh")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" 1>&2\nexit 0\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write arg dump script: %v", err)
+	}
+
+	cfg := DefaultConfig(t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cfg.ModuleName = "heimdex_media_pipelines"
+	cfg.ScenesTimeout = 5 * time.Second
+
+	return &SubprocessRunner{cfg: cfg, python: scriptPath}
+}
+
 type fakeRunner struct {
 	doctorFn        func(ctx context.Context) (*Capabilities, error)
 	speechFn        func(ctx context.Context, videoPath, outPath string) (RunResult, error)
 	facesFn         func(ctx context.Context, videoPath, outPath string) (RunResult, error)
-	scenesFn        func(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (RunResult, error)
+	scenesFn        func(ctx context.Context, videoPath, videoID, speechResultPath, outPath string, ocrEnabled, redactPII bool) (RunResult, error)
 	validateFn      func(path string) (*PipelineOutput, error)
 	validateSceneFn func(path string) (*PipelineOutput, error)
 }
@@ -615,9 +767,9 @@ func (f *fakeRunner) RunFaces(ctx context.Context, videoPath, outPath string) (R
 	return RunResult{ExitCode: 0, OutputPath: outPath}, nil
 }
 
-func (f *fakeRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (RunResult, error) {
+func (f *fakeRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string, ocrEnabled, redactPII bool) (RunResult, error) {
 	if f.scenesFn != nil {
-		return f.scenesFn(ctx, videoPath, videoID, speechResultPath, outPath)
+		return f.scenesFn(ctx, videoPath, videoID, speechResultPath, outPath, ocrEnabled, redactPII)
 	}
 	return RunResult{ExitCode: 0, OutputPath: outPath}, nil
 }

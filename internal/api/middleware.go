@@ -58,6 +58,10 @@ func isLoopbackRemoteAddr(remoteAddr string) bool {
 }
 
 func CORSAllowlist() func(http.Handler) http.Handler {
+	return CORSAllowlistMethods("GET, HEAD, OPTIONS")
+}
+
+func CORSAllowlistMethods(methods string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
@@ -74,7 +78,7 @@ func CORSAllowlist() func(http.Handler) http.Handler {
 
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Add("Vary", "Origin")
-				w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Methods", methods)
 				w.Header().Set("Access-Control-Allow-Headers", "Range, Content-Type, Authorization, X-Heimdex-Request-Id, X-Heimdex-Device-Id")
 				w.Header().Set("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length, Content-Type")
 			}

@@ -18,6 +18,7 @@ type Capabilities struct {
 	HasFaces  bool      `json:"-"`
 	HasSpeech bool      `json:"-"`
 	HasScenes bool      `json:"-"`
+	HasOCR    bool      `json:"-"`
 	ProbedAt  time.Time `json:"-"`
 }
 
@@ -26,6 +27,7 @@ type PipelinesInfo struct {
 	Speech bool `json:"speech"`
 	Faces  bool `json:"faces"`
 	Scenes bool `json:"scenes"`
+	OCR    bool `json:"ocr"`
 }
 
 // PythonInfo holds Python runtime information.
@@ -94,6 +96,8 @@ type SceneBoundary struct {
 	KeywordTags         []string `json:"keyword_tags"`
 	ProductTags         []string `json:"product_tags"`
 	ProductEntities     []string `json:"product_entities"`
+	OCRTextRaw          string   `json:"ocr_text_raw,omitempty"`
+	OCRCharCount        int      `json:"ocr_char_count,omitempty"`
 }
 
 // RequiredFieldsPresent checks the hard invariants the agent enforces.

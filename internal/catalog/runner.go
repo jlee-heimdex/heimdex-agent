@@ -19,29 +19,59 @@ import (
 )
 
 type Runner struct {
-	service           *Service
-	repo              Repository
-	pipeRunner        pipelines.Runner
-	ffmpeg            pipeline.FFmpeg
-	doctor            *pipelines.CachedDoctor
-	cloudClient       cloud.Client
-	fallbackLibraryID string
-	logger            *slog.Logger
-	pollInterval      time.Duration
-	running           atomic.Bool
-	paused            atomic.Bool
+	service                 *Service
+	repo                    Repository
+	config                  OCRConfig
+	pipeRunner              pipelines.Runner
+	ffmpeg                  pipeline.FFmpeg
+	doctor                  *pipelines.CachedDoctor
+	cloudClient             cloud.Client
+	fallbackLibraryID       string
+	logger                  *slog.Logger
+	pollInterval            time.Duration
+	running                 atomic.Bool
+	paused                  atomic.Bool
+	parallelFacesWithSpeech bool
+}
+
+type OCRConfig interface {
+	OCREnabled() bool
+	OCRRedactPII() bool
+}
+
+type defaultOCRConfig struct{}
+
+func (c defaultOCRConfig) OCREnabled() bool {
+	return false
+}
+
+func (c defaultOCRConfig) OCRRedactPII() bool {
+	return false
 }
 
 func NewRunner(service *Service, repo Repository, pipeRunner pipelines.Runner, ffmpeg pipeline.FFmpeg, doctor *pipelines.CachedDoctor, logger *slog.Logger) *Runner {
 	return &Runner{
 		service:      service,
 		repo:         repo,
+		config:       defaultOCRConfig{},
 		pipeRunner:   pipeRunner,
 		ffmpeg:       ffmpeg,
 		doctor:       doctor,
 		logger:       logger,
 		pollInterval: 5 * time.Second,
 	}
+}
+
+func (r *Runner) SetOCRConfig(config OCRConfig) {
+	if config == nil {
+		r.config = defaultOCRConfig{}
+		return
+	}
+	r.config = config
+}
+
+func (r *Runner) SetParallelFacesWithSpeech(enabled bool) {
+	r.parallelFacesWithSpeech = enabled
 }
 
 // SetCloudClient configures the cloud client for scene upload after indexing.
@@ -319,6 +349,59 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 	}
 	completedSteps := 0
 
+	type stepResult struct {
+		name string
+		err  error
+	}
+
+	parallelCtx, parallelCancel := context.WithCancel(ctx)
+	defer parallelCancel()
+
+	var wg sync.WaitGroup
+	expectedResults := 0
+	results := make(chan stepResult, 2)
+
+	launchFaces := func() {
+		wg.Add(1)
+		expectedResults++
+		go func() {
+			defer wg.Done()
+			outPath := filepath.Join(artifactsBase, "faces", "result.json")
+			r.logger.Info("running faces pipeline", "job_id", job.ID, "file_id", file.ID)
+
+			result, err := r.pipeRunner.RunFaces(parallelCtx, file.Path, outPath)
+			if err != nil {
+				results <- stepResult{"faces", fmt.Errorf("faces pipeline error: %w", err)}
+				return
+			}
+			if !result.IsSuccess() {
+				results <- stepResult{"faces", fmt.Errorf("faces pipeline exited %d: %s", result.ExitCode, truncateStr(result.StderrTail, 512))}
+				return
+			}
+			if _, err := r.pipeRunner.ValidateOutput(outPath); err != nil {
+				results <- stepResult{"faces", fmt.Errorf("faces output invalid: %w", err)}
+				return
+			}
+			r.logger.Info("faces pipeline completed", "job_id", job.ID, "duration", result.Duration)
+			results <- stepResult{"faces", nil}
+		}()
+	}
+
+	// Faces does not depend on speech; when flag is on, start faces early.
+	earlyFacesLaunched := false
+	if r.parallelFacesWithSpeech && caps.HasFaces {
+		launchFaces()
+		earlyFacesLaunched = true
+	}
+
+	drainAndFail := func(msg string) {
+		parallelCancel()
+		go func() { wg.Wait(); close(results) }()
+		for range results {
+		}
+		r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, msg)
+	}
+
 	speechOutPath := filepath.Join(artifactsBase, "speech", "result.json")
 	speechOK := false
 
@@ -327,17 +410,16 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 
 		result, err := r.pipeRunner.RunSpeech(ctx, file.Path, speechOutPath)
 		if err != nil {
-			r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, fmt.Sprintf("speech pipeline error: %v", err))
+			drainAndFail(fmt.Sprintf("speech pipeline error: %v", err))
 			return
 		}
 		if !result.IsSuccess() {
-			r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed,
-				fmt.Sprintf("speech pipeline exited %d: %s", result.ExitCode, truncateStr(result.StderrTail, 512)))
+			drainAndFail(fmt.Sprintf("speech pipeline exited %d: %s", result.ExitCode, truncateStr(result.StderrTail, 512)))
 			return
 		}
 
 		if _, err := r.pipeRunner.ValidateOutput(speechOutPath); err != nil {
-			r.repo.UpdateJobStatus(ctx, job.ID, JobStatusFailed, fmt.Sprintf("speech output invalid: %v", err))
+			drainAndFail(fmt.Sprintf("speech output invalid: %v", err))
 			return
 		}
 
@@ -347,72 +429,39 @@ func (r *Runner) processIndexJob(ctx context.Context, job *Job) {
 		r.logger.Info("speech pipeline completed", "job_id", job.ID, "duration", result.Duration)
 	}
 
-	// Faces and scenes run in parallel (both depend on speech, not on each other)
-	runFaces := caps.HasFaces
-	runScenes := caps.HasScenes && speechOK
+	if caps.HasFaces && !earlyFacesLaunched {
+		launchFaces()
+	}
 
-	if runFaces || runScenes {
-		type stepResult struct {
-			name string
-			err  error
-		}
+	if caps.HasScenes && speechOK {
+		wg.Add(1)
+		expectedResults++
+		go func() {
+			defer wg.Done()
+			outPath := filepath.Join(artifactsBase, "scenes", "result.json")
+			r.logger.Info("running scenes pipeline", "job_id", job.ID, "file_id", file.ID)
+			ocrEnabled := caps.HasOCR && r.config.OCREnabled()
+			redactPII := r.config.OCRRedactPII()
 
-		parallelCtx, parallelCancel := context.WithCancel(ctx)
-		defer parallelCancel()
+			result, err := r.pipeRunner.RunScenes(parallelCtx, file.Path, file.ID, speechOutPath, outPath, ocrEnabled, redactPII)
+			if err != nil {
+				results <- stepResult{"scenes", fmt.Errorf("scenes pipeline error: %w", err)}
+				return
+			}
+			if !result.IsSuccess() {
+				results <- stepResult{"scenes", fmt.Errorf("scenes pipeline exited %d: %s", result.ExitCode, truncateStr(result.StderrTail, 512))}
+				return
+			}
+			if _, err := r.pipeRunner.ValidateSceneOutput(outPath); err != nil {
+				results <- stepResult{"scenes", fmt.Errorf("scenes output invalid: %w", err)}
+				return
+			}
+			r.logger.Info("scenes pipeline completed", "job_id", job.ID, "duration", result.Duration)
+			results <- stepResult{"scenes", nil}
+		}()
+	}
 
-		var wg sync.WaitGroup
-		results := make(chan stepResult, 2)
-
-		if runFaces {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				outPath := filepath.Join(artifactsBase, "faces", "result.json")
-				r.logger.Info("running faces pipeline", "job_id", job.ID, "file_id", file.ID)
-
-				result, err := r.pipeRunner.RunFaces(parallelCtx, file.Path, outPath)
-				if err != nil {
-					results <- stepResult{"faces", fmt.Errorf("faces pipeline error: %w", err)}
-					return
-				}
-				if !result.IsSuccess() {
-					results <- stepResult{"faces", fmt.Errorf("faces pipeline exited %d: %s", result.ExitCode, truncateStr(result.StderrTail, 512))}
-					return
-				}
-				if _, err := r.pipeRunner.ValidateOutput(outPath); err != nil {
-					results <- stepResult{"faces", fmt.Errorf("faces output invalid: %w", err)}
-					return
-				}
-				r.logger.Info("faces pipeline completed", "job_id", job.ID, "duration", result.Duration)
-				results <- stepResult{"faces", nil}
-			}()
-		}
-
-		if runScenes {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				outPath := filepath.Join(artifactsBase, "scenes", "result.json")
-				r.logger.Info("running scenes pipeline", "job_id", job.ID, "file_id", file.ID)
-
-				result, err := r.pipeRunner.RunScenes(parallelCtx, file.Path, file.ID, speechOutPath, outPath)
-				if err != nil {
-					results <- stepResult{"scenes", fmt.Errorf("scenes pipeline error: %w", err)}
-					return
-				}
-				if !result.IsSuccess() {
-					results <- stepResult{"scenes", fmt.Errorf("scenes pipeline exited %d: %s", result.ExitCode, truncateStr(result.StderrTail, 512))}
-					return
-				}
-				if _, err := r.pipeRunner.ValidateSceneOutput(outPath); err != nil {
-					results <- stepResult{"scenes", fmt.Errorf("scenes output invalid: %w", err)}
-					return
-				}
-				r.logger.Info("scenes pipeline completed", "job_id", job.ID, "duration", result.Duration)
-				results <- stepResult{"scenes", nil}
-			}()
-		}
-
+	if expectedResults > 0 {
 		go func() {
 			wg.Wait()
 			close(results)
@@ -466,6 +515,8 @@ func buildSceneIngestDocs(scenes []pipelines.SceneBoundary, sourceType string) [
 			KeywordTags:         s.KeywordTags,
 			ProductTags:         s.ProductTags,
 			ProductEntities:     s.ProductEntities,
+			OCRTextRaw:          s.OCRTextRaw,
+			OCRCharCount:        s.OCRCharCount,
 			SourceType:          sourceType,
 		})
 	}

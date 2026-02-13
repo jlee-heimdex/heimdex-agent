@@ -67,6 +67,7 @@ func TestStatusHandler_WithCachedCaps(t *testing.T) {
 			HasFaces:  true,
 			HasSpeech: true,
 			HasScenes: true,
+			HasOCR:    true,
 			ProbedAt:  time.Now(),
 			Summary:   pipelines.SummaryInfo{Available: 4, Total: 6},
 		},
@@ -95,6 +96,9 @@ func TestStatusHandler_WithCachedCaps(t *testing.T) {
 
 	if got, ok := pipelinesMap["has_scenes"].(bool); !ok || !got {
 		t.Fatalf("pipelines.has_scenes = %v, want true", pipelinesMap["has_scenes"])
+	}
+	if got, ok := pipelinesMap["has_ocr"].(bool); !ok || !got {
+		t.Fatalf("pipelines.has_ocr = %v, want true", pipelinesMap["has_ocr"])
 	}
 }
 
@@ -321,7 +325,7 @@ func (f *fakeDoctorPipelineRunner) RunFaces(ctx context.Context, videoPath, outP
 	return pipelines.RunResult{}, nil
 }
 
-func (f *fakeDoctorPipelineRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (pipelines.RunResult, error) {
+func (f *fakeDoctorPipelineRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string, ocrEnabled, redactPII bool) (pipelines.RunResult, error) {
 	return pipelines.RunResult{}, nil
 }
 

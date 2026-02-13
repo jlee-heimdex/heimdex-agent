@@ -28,6 +28,7 @@ type PipelineStatusResponse struct {
 	HasFaces    bool   `json:"has_faces"`
 	HasSpeech   bool   `json:"has_speech"`
 	HasScenes   bool   `json:"has_scenes"`
+	HasOCR      bool   `json:"has_ocr"`
 	LastProbeAt string `json:"last_probe_at,omitempty"`
 	DepsAvail   int    `json:"deps_available"`
 	DepsTotal   int    `json:"deps_total"`

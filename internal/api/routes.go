@@ -36,6 +36,13 @@ func NewRouter(cfg ServerConfig) *chi.Mux {
 	})
 
 	r.Group(func(r chi.Router) {
+		r.Use(CORSAllowlistMethods("GET, HEAD, POST, OPTIONS"))
+		r.Use(LoopbackGuard())
+		r.Post("/export/premiere", exportPremiereHandler(cfg))
+		r.Options("/export/premiere", noContent)
+	})
+
+	r.Group(func(r chi.Router) {
 		r.Use(AuthMiddleware(cfg.Repository, cfg.Logger))
 
 		r.Get("/status", statusHandler(cfg))
@@ -120,6 +127,7 @@ func statusHandler(cfg ServerConfig) http.HandlerFunc {
 					HasFaces:    caps.HasFaces,
 					HasSpeech:   caps.HasSpeech,
 					HasScenes:   caps.HasScenes,
+					HasOCR:      caps.HasOCR,
 					LastProbeAt: probeAt,
 					DepsAvail:   caps.Summary.Available,
 					DepsTotal:   caps.Summary.Total,

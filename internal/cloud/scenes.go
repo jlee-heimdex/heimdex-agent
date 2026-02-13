@@ -24,6 +24,8 @@ type SceneIngestDoc struct {
 	KeywordTags           []string `json:"keyword_tags,omitempty"`
 	ProductTags           []string `json:"product_tags,omitempty"`
 	ProductEntities       []string `json:"product_entities,omitempty"`
+	OCRTextRaw            string   `json:"ocr_text_raw,omitempty"`
+	OCRCharCount          int      `json:"ocr_char_count,omitempty"`
 	SourceType            string   `json:"source_type,omitempty"`
 	RequiredDriveNickname string   `json:"required_drive_nickname,omitempty"`
 }

@@ -34,6 +34,11 @@ const (
 	EnvCloudToken     = "HEIMDEX_CLOUD_TOKEN"
 	EnvCloudOrgSlug   = "HEIMDEX_CLOUD_ORG_SLUG"
 	EnvCloudLibraryID = "HEIMDEX_CLOUD_LIBRARY_ID"
+	EnvOCREnabled     = "HEIMDEX_OCR_ENABLED"
+	EnvOCRRedactPII   = "HEIMDEX_OCR_REDACT_PII"
+
+	// Performance tuning environment variable names
+	EnvParallelFacesWithSpeech = "HEIMDEX_PARALLEL_FACES_WITH_SPEECH"
 
 	// Database filename
 	DBFilename = "heimdex.db"
@@ -47,6 +52,7 @@ const (
 	DefaultPipelinesTimeoutSpeech = 1800 // 30 minutes
 	DefaultPipelinesTimeoutFaces  = 900  // 15 minutes
 	DefaultPipelinesTimeoutScenes = 600  // 10 minutes
+	DefaultPipelinesTimeoutOCR    = 600  // 10 minutes
 )
 
 // Config defines the application configuration interface
@@ -63,12 +69,16 @@ type Config interface {
 	PipelinesTimeoutSpeech() time.Duration
 	PipelinesTimeoutFaces() time.Duration
 	PipelinesTimeoutScenes() time.Duration
+	PipelinesTimeoutOCR() time.Duration
 	Headless() bool
 	CloudEnabled() bool
 	CloudBaseURL() string
 	CloudToken() string
 	CloudOrgSlug() string
 	CloudLibraryID() string
+	OCREnabled() bool
+	OCRRedactPII() bool
+	ParallelFacesWithSpeech() bool
 }
 
 // EnvConfig reads configuration from environment variables
@@ -88,6 +98,10 @@ type EnvConfig struct {
 	cloudToken     string
 	cloudOrgSlug   string
 	cloudLibraryID string
+	ocrEnabled     bool
+	ocrRedactPII   bool
+
+	parallelFacesWithSpeech bool
 }
 
 // New creates a new EnvConfig with defaults and environment variable overrides
@@ -134,10 +148,20 @@ func New() (*EnvConfig, error) {
 	if ce := os.Getenv(EnvCloudEnabled); ce == "true" || ce == "1" {
 		cfg.cloudEnabled = true
 	}
+	if oe := os.Getenv(EnvOCREnabled); oe == "true" || oe == "1" {
+		cfg.ocrEnabled = true
+	}
+	if rp := os.Getenv(EnvOCRRedactPII); rp == "true" || rp == "1" {
+		cfg.ocrRedactPII = true
+	}
 	cfg.cloudBaseURL = os.Getenv(EnvCloudBaseURL)
 	cfg.cloudToken = os.Getenv(EnvCloudToken)
 	cfg.cloudOrgSlug = os.Getenv(EnvCloudOrgSlug)
 	cfg.cloudLibraryID = os.Getenv(EnvCloudLibraryID)
+
+	if pf := os.Getenv(EnvParallelFacesWithSpeech); pf == "true" || pf == "1" {
+		cfg.parallelFacesWithSpeech = true
+	}
 
 	return cfg, nil
 }
@@ -199,6 +223,10 @@ func (c *EnvConfig) PipelinesTimeoutScenes() time.Duration {
 	return time.Duration(DefaultPipelinesTimeoutScenes) * time.Second
 }
 
+func (c *EnvConfig) PipelinesTimeoutOCR() time.Duration {
+	return time.Duration(DefaultPipelinesTimeoutOCR) * time.Second
+}
+
 func (c *EnvConfig) Headless() bool {
 	return c.headless
 }
@@ -221,6 +249,18 @@ func (c *EnvConfig) CloudOrgSlug() string {
 
 func (c *EnvConfig) CloudLibraryID() string {
 	return c.cloudLibraryID
+}
+
+func (c *EnvConfig) OCREnabled() bool {
+	return c.ocrEnabled
+}
+
+func (c *EnvConfig) OCRRedactPII() bool {
+	return c.ocrRedactPII
+}
+
+func (c *EnvConfig) ParallelFacesWithSpeech() bool {
+	return c.parallelFacesWithSpeech
 }
 
 // defaultDataDir returns the default data directory path

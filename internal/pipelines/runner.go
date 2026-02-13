@@ -38,7 +38,7 @@ type Runner interface {
 	// RunScenes executes the scene detection pipeline for a video file.
 	// It requires the speech result path so scenes can aggregate transcripts.
 	// videoID is used to construct scene_id values in the output.
-	RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (RunResult, error)
+	RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string, ocrEnabled, redactPII bool) (RunResult, error)
 
 	// ValidateOutput reads a pipeline output JSON and checks required fields.
 	ValidateOutput(path string) (*PipelineOutput, error)
@@ -140,6 +140,7 @@ func (r *SubprocessRunner) RunDoctor(ctx context.Context) (*Capabilities, error)
 		"faces", caps.HasFaces,
 		"speech", caps.HasSpeech,
 		"scenes", caps.HasScenes,
+		"ocr", caps.HasOCR,
 		"deps_available", caps.Summary.Available,
 		"deps_total", caps.Summary.Total,
 	)
@@ -158,6 +159,7 @@ func DeriveCapabilities(caps *Capabilities) {
 		caps.HasSpeech = caps.Pipelines.Speech
 		caps.HasFaces = caps.Pipelines.Faces
 		caps.HasScenes = caps.Pipelines.Scenes
+		caps.HasOCR = caps.Pipelines.OCR
 		return
 	}
 
@@ -166,6 +168,7 @@ func DeriveCapabilities(caps *Capabilities) {
 	caps.HasSpeech = isAvailable(caps.Dependencies, "whisper") &&
 		isAvailable(caps.Executables, "ffmpeg")
 	caps.HasScenes = isAvailable(caps.Executables, "ffmpeg")
+	caps.HasOCR = isAvailable(caps.Dependencies, "paddleocr")
 }
 
 // RunSpeech runs the speech pipeline CLI.
@@ -195,20 +198,28 @@ func (r *SubprocessRunner) RunFaces(ctx context.Context, videoPath, outPath stri
 	return result, nil
 }
 
-func (r *SubprocessRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (RunResult, error) {
+func (r *SubprocessRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string, ocrEnabled, redactPII bool) (RunResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.ScenesTimeout)
 	defer cancel()
 
 	keyframeDir := filepath.Join(filepath.Dir(outPath), "..", "thumbnails")
-
-	result := r.exec(ctx, outPath,
+	args := []string{
 		"scenes", "pipeline",
 		"--video", videoPath,
 		"--video-id", videoID,
 		"--speech-result", speechResultPath,
 		"--keyframe-dir", keyframeDir,
 		"--out", outPath,
-	)
+	}
+
+	if ocrEnabled {
+		args = append(args, "--ocr")
+	}
+	if redactPII {
+		args = append(args, "--redact-pii")
+	}
+
+	result := r.exec(ctx, outPath, args...)
 	return result, nil
 }
 

@@ -46,7 +46,7 @@ type fakePipeRunner struct {
 
 	speechFn        func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error)
 	facesFn         func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error)
-	scenesFn        func(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (pipelines.RunResult, error)
+	scenesFn        func(ctx context.Context, videoPath, videoID, speechResultPath, outPath string, ocrEnabled, redactPII bool) (pipelines.RunResult, error)
 	validateFn      func(path string) (*pipelines.PipelineOutput, error)
 	validateSceneFn func(path string) (*pipelines.PipelineOutput, error)
 	artifacts       string
@@ -76,10 +76,10 @@ func (f *fakePipeRunner) RunFaces(ctx context.Context, videoPath, outPath string
 	return pipelines.RunResult{ExitCode: 0, OutputPath: outPath, Duration: 50 * time.Millisecond}, nil
 }
 
-func (f *fakePipeRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (pipelines.RunResult, error) {
+func (f *fakePipeRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string, ocrEnabled, redactPII bool) (pipelines.RunResult, error) {
 	f.scenesCalled.Add(1)
 	if f.scenesFn != nil {
-		return f.scenesFn(ctx, videoPath, videoID, speechResultPath, outPath)
+		return f.scenesFn(ctx, videoPath, videoID, speechResultPath, outPath, ocrEnabled, redactPII)
 	}
 	os.MkdirAll(filepath.Dir(outPath), 0755)
 	os.WriteFile(outPath, []byte(`{"schema_version":"1.0","pipeline_version":"0.2.0","model_version":"ffmpeg-scenecut"}`), 0644)
@@ -111,6 +111,19 @@ type fakeDoctorRunner struct {
 	caps *pipelines.Capabilities
 }
 
+type fakeOCRConfig struct {
+	enabled bool
+	redact  bool
+}
+
+func (c fakeOCRConfig) OCREnabled() bool {
+	return c.enabled
+}
+
+func (c fakeOCRConfig) OCRRedactPII() bool {
+	return c.redact
+}
+
 func (f *fakeDoctorRunner) RunDoctor(ctx context.Context) (*pipelines.Capabilities, error) {
 	return f.caps, nil
 }
@@ -123,7 +136,7 @@ func (f *fakeDoctorRunner) RunFaces(ctx context.Context, videoPath, outPath stri
 	return pipelines.RunResult{}, nil
 }
 
-func (f *fakeDoctorRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (pipelines.RunResult, error) {
+func (f *fakeDoctorRunner) RunScenes(ctx context.Context, videoPath, videoID, speechResultPath, outPath string, ocrEnabled, redactPII bool) (pipelines.RunResult, error) {
 	return pipelines.RunResult{}, nil
 }
 
@@ -323,6 +336,43 @@ func TestProcessIndexJob_ProgressWithAllThreeSteps(t *testing.T) {
 	}
 }
 
+func TestProcessIndexJob_PassesOCRFlagsToScenes(t *testing.T) {
+	gotOCREnabled := false
+	gotRedactPII := false
+
+	fake := &fakePipeRunner{
+		scenesFn: func(ctx context.Context, videoPath, videoID, speechResultPath, outPath string, ocrEnabled, redactPII bool) (pipelines.RunResult, error) {
+			gotOCREnabled = ocrEnabled
+			gotRedactPII = redactPII
+			return pipelines.RunResult{ExitCode: 0, OutputPath: outPath, Duration: 10 * time.Millisecond}, nil
+		},
+	}
+	caps := &pipelines.Capabilities{
+		HasSpeech: true,
+		HasFaces:  false,
+		HasScenes: true,
+		HasOCR:    true,
+		ProbedAt:  time.Now(),
+	}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+	runner.SetOCRConfig(fakeOCRConfig{enabled: true, redact: true})
+	job, _ := createTestJobAndFile(t, repo)
+
+	runner.processIndexJob(context.Background(), job)
+
+	updatedJob, _ := repo.GetJob(context.Background(), job.ID)
+	if updatedJob.Status != JobStatusCompleted {
+		t.Errorf("job status = %s, want %s", updatedJob.Status, JobStatusCompleted)
+	}
+	if !gotOCREnabled {
+		t.Error("ocrEnabled = false, want true")
+	}
+	if !gotRedactPII {
+		t.Error("redactPII = false, want true")
+	}
+}
+
 func TestProcessIndexJob_NoPipelineRunner(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
@@ -387,7 +437,7 @@ func TestProcessIndexJob_FacesFailsScenesStillDrains(t *testing.T) {
 		facesFn: func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error) {
 			return pipelines.RunResult{ExitCode: 1, StderrTail: "faces failed"}, nil
 		},
-		scenesFn: func(ctx context.Context, videoPath, videoID, speechResultPath, outPath string) (pipelines.RunResult, error) {
+		scenesFn: func(ctx context.Context, videoPath, videoID, speechResultPath, outPath string, ocrEnabled, redactPII bool) (pipelines.RunResult, error) {
 			defer close(scenesExited)
 
 			select {
@@ -799,6 +849,50 @@ func TestBuildSceneIngestDocs_BackwardCompat_MissingFields(t *testing.T) {
 	}
 	if d.ProductEntities != nil {
 		t.Errorf("ProductEntities = %v, want nil", d.ProductEntities)
+	}
+}
+
+func TestBuildSceneIngestDocs_PropagatesOCRFields(t *testing.T) {
+	input := []pipelines.SceneBoundary{
+		{
+			SceneID:      "vid_scene_0",
+			StartMs:      0,
+			EndMs:        5000,
+			OCRTextRaw:   "hello",
+			OCRCharCount: 5,
+		},
+	}
+
+	docs := buildSceneIngestDocs(input, "local")
+	if len(docs) != 1 {
+		t.Fatalf("got %d docs, want 1", len(docs))
+	}
+	if docs[0].OCRTextRaw != "hello" {
+		t.Errorf("OCRTextRaw = %q, want %q", docs[0].OCRTextRaw, "hello")
+	}
+	if docs[0].OCRCharCount != 5 {
+		t.Errorf("OCRCharCount = %d, want 5", docs[0].OCRCharCount)
+	}
+}
+
+func TestBuildSceneIngestDocs_EmptyOCR(t *testing.T) {
+	input := []pipelines.SceneBoundary{
+		{
+			SceneID: "vid_scene_0",
+			StartMs: 0,
+			EndMs:   5000,
+		},
+	}
+
+	docs := buildSceneIngestDocs(input, "local")
+	if len(docs) != 1 {
+		t.Fatalf("got %d docs, want 1", len(docs))
+	}
+	if docs[0].OCRTextRaw != "" {
+		t.Errorf("OCRTextRaw = %q, want empty", docs[0].OCRTextRaw)
+	}
+	if docs[0].OCRCharCount != 0 {
+		t.Errorf("OCRCharCount = %d, want 0", docs[0].OCRCharCount)
 	}
 }
 
@@ -1215,6 +1309,158 @@ func TestBackfillCloudUploads_SkipsAlreadyUploaded(t *testing.T) {
 	}
 	if uploadCount != 1 {
 		t.Errorf("expected 1 upload_scenes job (pre-existing), got %d", uploadCount)
+	}
+}
+
+func TestProcessIndexJob_FacesParallelWithSpeech(t *testing.T) {
+	facesStarted := make(chan struct{})
+	speechDone := make(chan struct{})
+	facesStartedBeforeSpeechDone := atomic.Bool{}
+
+	fake := &fakePipeRunner{
+		speechFn: func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error) {
+			time.Sleep(50 * time.Millisecond)
+			close(speechDone)
+			os.MkdirAll(filepath.Dir(outPath), 0755)
+			os.WriteFile(outPath, []byte(`{"schema_version":"1.0","pipeline_version":"0.2.0","model_version":"whisper-large-v3"}`), 0644)
+			return pipelines.RunResult{ExitCode: 0, OutputPath: outPath, Duration: 50 * time.Millisecond}, nil
+		},
+		facesFn: func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error) {
+			close(facesStarted)
+			select {
+			case <-speechDone:
+			default:
+				facesStartedBeforeSpeechDone.Store(true)
+			}
+			os.MkdirAll(filepath.Dir(outPath), 0755)
+			os.WriteFile(outPath, []byte(`{"schema_version":"1.0","pipeline_version":"0.2.0","model_version":"scrfd"}`), 0644)
+			return pipelines.RunResult{ExitCode: 0, OutputPath: outPath, Duration: 10 * time.Millisecond}, nil
+		},
+	}
+	caps := &pipelines.Capabilities{
+		HasSpeech: true,
+		HasFaces:  true,
+		HasScenes: true,
+		ProbedAt:  time.Now(),
+	}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+	runner.SetParallelFacesWithSpeech(true)
+	job, _ := createTestJobAndFile(t, repo)
+
+	runner.processIndexJob(context.Background(), job)
+
+	updatedJob, _ := repo.GetJob(context.Background(), job.ID)
+	if updatedJob.Status != JobStatusCompleted {
+		t.Errorf("job status = %s, want %s", updatedJob.Status, JobStatusCompleted)
+	}
+	if !facesStartedBeforeSpeechDone.Load() {
+		t.Error("faces should have started before speech completed when flag is true")
+	}
+	if fake.speechCalled.Load() != 1 {
+		t.Errorf("speech called %d times, want 1", fake.speechCalled.Load())
+	}
+	if fake.facesCalled.Load() != 1 {
+		t.Errorf("faces called %d times, want 1", fake.facesCalled.Load())
+	}
+	if fake.scenesCalled.Load() != 1 {
+		t.Errorf("scenes called %d times, want 1", fake.scenesCalled.Load())
+	}
+}
+
+func TestProcessIndexJob_FacesParallelFlag_False_PreservesOrder(t *testing.T) {
+	speechDone := make(chan struct{})
+	facesStartedBeforeSpeechDone := atomic.Bool{}
+
+	fake := &fakePipeRunner{
+		speechFn: func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error) {
+			time.Sleep(50 * time.Millisecond)
+			close(speechDone)
+			os.MkdirAll(filepath.Dir(outPath), 0755)
+			os.WriteFile(outPath, []byte(`{"schema_version":"1.0","pipeline_version":"0.2.0","model_version":"whisper-large-v3"}`), 0644)
+			return pipelines.RunResult{ExitCode: 0, OutputPath: outPath, Duration: 50 * time.Millisecond}, nil
+		},
+		facesFn: func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error) {
+			select {
+			case <-speechDone:
+			default:
+				facesStartedBeforeSpeechDone.Store(true)
+			}
+			os.MkdirAll(filepath.Dir(outPath), 0755)
+			os.WriteFile(outPath, []byte(`{"schema_version":"1.0","pipeline_version":"0.2.0","model_version":"scrfd"}`), 0644)
+			return pipelines.RunResult{ExitCode: 0, OutputPath: outPath, Duration: 10 * time.Millisecond}, nil
+		},
+	}
+	caps := &pipelines.Capabilities{
+		HasSpeech: true,
+		HasFaces:  true,
+		HasScenes: true,
+		ProbedAt:  time.Now(),
+	}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+	job, _ := createTestJobAndFile(t, repo)
+
+	runner.processIndexJob(context.Background(), job)
+
+	updatedJob, _ := repo.GetJob(context.Background(), job.ID)
+	if updatedJob.Status != JobStatusCompleted {
+		t.Errorf("job status = %s, want %s", updatedJob.Status, JobStatusCompleted)
+	}
+	if facesStartedBeforeSpeechDone.Load() {
+		t.Error("faces should NOT start before speech when flag is false")
+	}
+}
+
+func TestProcessIndexJob_FacesParallel_SpeechFails_FacesStillCompletes(t *testing.T) {
+	facesCompleted := atomic.Bool{}
+
+	fake := &fakePipeRunner{
+		speechFn: func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error) {
+			time.Sleep(20 * time.Millisecond)
+			return pipelines.RunResult{ExitCode: 1, StderrTail: "speech failed"}, nil
+		},
+		facesFn: func(ctx context.Context, videoPath, outPath string) (pipelines.RunResult, error) {
+			time.Sleep(50 * time.Millisecond)
+			facesCompleted.Store(true)
+			os.MkdirAll(filepath.Dir(outPath), 0755)
+			os.WriteFile(outPath, []byte(`{"schema_version":"1.0","pipeline_version":"0.2.0","model_version":"scrfd"}`), 0644)
+			return pipelines.RunResult{ExitCode: 0, OutputPath: outPath, Duration: 50 * time.Millisecond}, nil
+		},
+	}
+	caps := &pipelines.Capabilities{
+		HasSpeech: true,
+		HasFaces:  true,
+		HasScenes: true,
+		ProbedAt:  time.Now(),
+	}
+
+	runner, repo := setupRunnerTest(t, fake, caps)
+	runner.SetParallelFacesWithSpeech(true)
+	job, _ := createTestJobAndFile(t, repo)
+
+	done := make(chan struct{})
+	go func() {
+		runner.processIndexJob(context.Background(), job)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("processIndexJob did not complete")
+	}
+
+	updatedJob, _ := repo.GetJob(context.Background(), job.ID)
+	if updatedJob.Status != JobStatusFailed {
+		t.Errorf("job status = %s, want %s (speech failed)", updatedJob.Status, JobStatusFailed)
+	}
+
+	if fake.facesCalled.Load() != 1 {
+		t.Errorf("faces called %d times, want 1 (should have been launched early)", fake.facesCalled.Load())
+	}
+	if fake.scenesCalled.Load() != 0 {
+		t.Errorf("scenes called %d times, want 0 (speech failed)", fake.scenesCalled.Load())
 	}
 }
 
